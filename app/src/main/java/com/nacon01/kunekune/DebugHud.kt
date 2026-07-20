@@ -70,6 +70,15 @@ class DebugHud(context: Context) : TextView(context) {
         val savedRoute = snapshot.recording.savedRoute?.let {
             "\n保存済み: ${it.pointCount}点 ${it.totalDistanceMeters.formatRouteDistance()}m"
         } ?: ""
+        val guidance = if (snapshot.guidance.state == GuidanceState.INACTIVE) {
+            "\n誘導状態: 停止"
+        } else {
+            "\n誘導状態: ${guidanceStateText(snapshot.guidance.state)}" +
+                "\n誘導角度差: ${snapshot.guidance.angleDifferenceDegrees?.formatDegrees() ?: "--"}度" +
+                "\n誘導残距離: ${snapshot.guidance.remainingDistanceMeters?.formatRouteDistance() ?: "--"}m" +
+                "\n経路進捗率: ${snapshot.guidance.progressPercent?.formatRouteDistance() ?: "--"}%" +
+                if (snapshot.guidance.trackingLost) "\n誘導トラッキング: 喪失" else ""
+        }
         return "状態: $state$reason\n" +
             "ポーズ: $position m\n" +
             "累積移動距離: ${snapshot.cumulativeDistance.formatMeters()} m\n" +
@@ -81,6 +90,7 @@ class DebugHud(context: Context) : TextView(context) {
             "記録状態: $recordingState\n" +
             "記録点数: ${snapshot.recording.pointCount}\n" +
             "記録中の累積距離: ${snapshot.recording.totalDistanceMeters.formatRouteDistance()}m" +
+            guidance +
             savedRoute
     }
 
@@ -93,6 +103,12 @@ class DebugHud(context: Context) : TextView(context) {
         TrackingFailureReason.EXCESSIVE_MOTION -> "動きが速すぎます: ゆっくり端末を動かしてください"
         TrackingFailureReason.INSUFFICIENT_FEATURES -> "特徴点不足: カメラを模様のある場所に向けてください"
         TrackingFailureReason.CAMERA_UNAVAILABLE -> "カメラ利用不可: カメラを確認してください"
+    }
+
+    private fun guidanceStateText(state: GuidanceState): String = when (state) {
+        GuidanceState.INACTIVE -> "停止"
+        GuidanceState.GUIDING -> "誘導中"
+        GuidanceState.ARRIVED -> "到着"
     }
 
     private fun markerStateText(state: MarkerDetectionState): String = when (state) {
@@ -110,4 +126,6 @@ class DebugHud(context: Context) : TextView(context) {
     private fun Float.formatRouteDistance() = String.format(Locale.US, "%.1f", this)
 
     private fun Float.formatFps() = String.format(Locale.US, "%.1f", this)
+
+    private fun Float.formatDegrees() = String.format(Locale.US, "%.1f", this)
 }

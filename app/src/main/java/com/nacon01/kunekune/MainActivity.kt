@@ -11,6 +11,8 @@ import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.LinearLayout
+import android.widget.TextView
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.exceptions.UnavailableApkTooOldException
 import com.google.ar.core.exceptions.UnavailableDeviceNotCompatibleException
@@ -20,8 +22,12 @@ import com.google.ar.core.exceptions.UnavailableUserDeclinedInstallationExceptio
 class MainActivity : Activity() {
     private lateinit var glSurfaceView: GLSurfaceView
     private lateinit var debugHud: DebugHud
+    private lateinit var guidanceView: GuidanceArrowView
     private lateinit var recordButton: Button
+    private lateinit var guidanceButton: Button
+    private lateinit var guidanceHint: TextView
     private lateinit var trackingManager: ArTrackingManager
+    private var latestGuidanceState = GuidanceState.INACTIVE
     private var installRequested = false
 
     private val renderer by lazy {
@@ -46,6 +52,7 @@ class MainActivity : Activity() {
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         }
         debugHud = DebugHud(this)
+        guidanceView = GuidanceArrowView(this)
         recordButton = Button(this).apply {
             text = "マーカーを映してください"
             isEnabled = false
@@ -58,9 +65,44 @@ class MainActivity : Activity() {
                 }
             }
         }
+        guidanceButton = Button(this).apply {
+            text = "誘導開始"
+            isEnabled = false
+            setOnClickListener {
+                if (latestGuidanceState == GuidanceState.GUIDING) {
+                    trackingManager.stopGuidance()
+                } else {
+                    trackingManager.startGuidance()
+                }
+            }
+        }
+        guidanceHint = TextView(this).apply {
+            setTextColor(Color.WHITE)
+            textSize = 12f
+            gravity = Gravity.CENTER
+            setPadding(8, 2, 8, 2)
+        }
         trackingManager.onSnapshot = { snapshot ->
             debugHud.update(snapshot)
-            runOnUiThread { updateRecordingButton(snapshot) }
+            guidanceView.update(snapshot.guidance)
+            runOnUiThread { updateControls(snapshot) }
+        }
+
+        val buttonRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(recordButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(guidanceButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        }
+        val bottomControls = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(buttonRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            addView(guidanceHint, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
         }
 
         val root = FrameLayout(this).apply {
@@ -69,11 +111,15 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             ))
+            addView(guidanceView, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT
+            ))
             addView(debugHud, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
-            addView(recordButton, FrameLayout.LayoutParams(
+            addView(bottomControls, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.BOTTOM
@@ -126,7 +172,8 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun updateRecordingButton(snapshot: TrackingSnapshot) {
+    private fun updateControls(snapshot: TrackingSnapshot) {
+        latestGuidanceState = snapshot.guidance.state
         if (snapshot.recording.isRecording) {
             recordButton.text = "記録終了"
             recordButton.isEnabled = true
@@ -134,6 +181,27 @@ class MainActivity : Activity() {
             val markerRecognized = snapshot.marker.state == MarkerDetectionState.TRACKING
             recordButton.text = if (markerRecognized) "記録開始" else "マーカーを映してください"
             recordButton.isEnabled = markerRecognized
+        }
+
+        if (snapshot.guidance.state == GuidanceState.GUIDING) {
+            guidanceButton.text = "誘導終了"
+            guidanceButton.isEnabled = true
+            guidanceHint.text = if (snapshot.guidance.trackingLost) {
+                "トラッキングを復帰してください"
+            } else {
+                ""
+            }
+        } else {
+            guidanceButton.text = "誘導開始"
+            val hasRoute = snapshot.recording.savedRoute != null
+            val markerRecognized = snapshot.marker.state == MarkerDetectionState.TRACKING
+            guidanceButton.isEnabled = hasRoute && markerRecognized
+            guidanceHint.text = when {
+                !hasRoute -> "保存済み経路がありません"
+                !markerRecognized -> "マーカーを認識してください"
+                snapshot.guidance.state == GuidanceState.ARRIVED -> "到着しました"
+                else -> ""
+            }
         }
     }
 

@@ -22,6 +22,7 @@ enum class MarkerDetectionState {
 data class MarkerTrackingSnapshot(
     val state: MarkerDetectionState,
     val cameraPoseInMarkerSpace: Pose?,
+    val markerPoseInWorld: Pose?,
     val distanceMeters: Float?
 )
 
@@ -87,13 +88,13 @@ class MarkerAnchor(private val context: Context) {
         val distance = translation?.let {
             sqrt(it[0] * it[0] + it[1] * it[1] + it[2] * it[2])
         }
-        return MarkerTrackingSnapshot(state, cameraPose, distance)
+        return MarkerTrackingSnapshot(state, cameraPose, markerPose, distance)
     }
 
     fun stoppedSnapshot(): MarkerTrackingSnapshot {
         if (anchor != null) state = MarkerDetectionState.LOST
         latestCameraPose = null
-        return MarkerTrackingSnapshot(state, null, null)
+        return MarkerTrackingSnapshot(state, null, null, null)
     }
 
     fun close() {

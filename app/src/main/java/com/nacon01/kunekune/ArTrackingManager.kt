@@ -3,6 +3,7 @@
 import android.content.Context
 import com.google.ar.core.Config
 import com.google.ar.core.Frame
+import com.google.ar.core.Pose
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingFailureReason
 import com.google.ar.core.TrackingState
@@ -13,6 +14,20 @@ import com.google.ar.core.exceptions.UnavailableDeviceNotCompatibleException
 import com.google.ar.core.exceptions.UnavailableSdkTooOldException
 import kotlin.math.hypot
 
+enum class GuidanceState {
+    INACTIVE,
+    GUIDING,
+    ARRIVED
+}
+
+data class GuidanceSnapshot(
+    val state: GuidanceState,
+    val angleDifferenceDegrees: Float?,
+    val remainingDistanceMeters: Float?,
+    val progressPercent: Float?,
+    val trackingLost: Boolean
+)
+
 data class TrackingSnapshot(
     val state: TrackingState,
     val failureReason: TrackingFailureReason,
@@ -21,7 +36,8 @@ data class TrackingSnapshot(
     val straightDistance: Float,
     val framesPerSecond: Float,
     val marker: MarkerTrackingSnapshot,
-    val recording: RecordingSnapshot
+    val recording: RecordingSnapshot,
+    val guidance: GuidanceSnapshot
 )
 
 class ArTrackingManager(context: Context) {
@@ -29,7 +45,8 @@ class ArTrackingManager(context: Context) {
     private val markerAnchor = MarkerAnchor(appContext)
     private val routeRecorder = RouteRecorder()
     private val routeStore = RouteStore(appContext)
-    private var savedRouteSummary = loadSavedRouteSummary()
+    private var savedRoute: RecordedRoute? = loadSavedRoute()
+    private var savedRouteSummary = savedRoute?.summary()
     private var session: Session? = null
     private var cameraTextureName: Int? = null
     private var displayRotation = 0
@@ -41,6 +58,9 @@ class ArTrackingManager(context: Context) {
     private var frameCount = 0
     private var fpsWindowStartNanos = System.nanoTime()
     private var framesPerSecond = 0f
+    private val guidanceEngine = GuidanceEngine()
+    private var guidanceState = GuidanceState.INACTIVE
+    private var lastGuidanceResult: GuidanceResult? = null
 
     @Volatile
     private var latestMarkerState = MarkerDetectionState.NOT_DETECTED
@@ -64,12 +84,32 @@ class ArTrackingManager(context: Context) {
         val route = routeRecorder.stop() ?: return false
         return try {
             routeStore.save(route)
+            savedRoute = route
             savedRouteSummary = route.summary()
             true
         } catch (_: Exception) {
             reportError("経路を保存できませんでした。")
             false
         }
+    }
+
+    fun startGuidance(): Boolean {
+        if (guidanceState == GuidanceState.GUIDING ||
+            savedRoute?.points.isNullOrEmpty() ||
+            latestMarkerState != MarkerDetectionState.TRACKING
+        ) {
+            return false
+        }
+        guidanceState = GuidanceState.GUIDING
+        lastGuidanceResult = null
+        return true
+    }
+
+    fun stopGuidance(): Boolean {
+        if (guidanceState == GuidanceState.INACTIVE) return false
+        guidanceState = GuidanceState.INACTIVE
+        lastGuidanceResult = null
+        return true
     }
 
     fun createSession(): String? {
@@ -97,7 +137,7 @@ class ArTrackingManager(context: Context) {
         } catch (_: UnavailableApkTooOldException) {
             reportError("Google Play 開発者サービス（AR向け）を更新してください。")
         } catch (_: UnavailableSdkTooOldException) {
-            reportError("ARCore SDKが古すぎます。アプリを更新してください。")
+            reportError("ARCore SDKが古すぎます。")
         } catch (_: ImageInsufficientQualityException) {
             reportError("マーカー画像の品質が不足しています")
         } catch (_: Exception) {
@@ -135,6 +175,8 @@ class ArTrackingManager(context: Context) {
         session = null
         markerAnchor.close()
         latestMarkerState = MarkerDetectionState.NOT_DETECTED
+        guidanceState = GuidanceState.INACTIVE
+        lastGuidanceResult = null
         publishStopped()
     }
 
@@ -168,6 +210,7 @@ class ArTrackingManager(context: Context) {
         } else {
             0f
         }
+        val guidance = updateGuidance(camera.pose, camera.trackingState, marker.markerPoseInWorld, position)
 
         onSnapshot?.invoke(
             TrackingSnapshot(
@@ -178,11 +221,65 @@ class ArTrackingManager(context: Context) {
                 straightDistance = straightDistance,
                 framesPerSecond = framesPerSecond,
                 marker = marker,
-                recording = routeRecorder.snapshot(savedRouteSummary)
+                recording = routeRecorder.snapshot(savedRouteSummary),
+                guidance = guidance
             )
         )
         return frame
     }
+
+    private fun updateGuidance(
+        cameraPose: Pose,
+        cameraTrackingState: TrackingState,
+        markerPoseInWorld: Pose?,
+        currentPosition: FloatArray?
+    ): GuidanceSnapshot {
+        if (guidanceState == GuidanceState.INACTIVE) {
+            return GuidanceSnapshot(GuidanceState.INACTIVE, null, null, null, false)
+        }
+
+        val trackingLost = cameraTrackingState != TrackingState.TRACKING
+        if (guidanceState == GuidanceState.GUIDING &&
+            !trackingLost &&
+            markerPoseInWorld != null &&
+            currentPosition != null
+        ) {
+            val route = savedRoute?.points?.map { point ->
+                val world = markerPoseInWorld.transformPoint(floatArrayOf(point.x, point.y, point.z))
+                GuidanceVector3(world[0], world[1], world[2])
+            }
+            if (!route.isNullOrEmpty()) {
+                val forwardPoint = cameraPose.transformPoint(floatArrayOf(0f, 0f, -1f))
+                val forward = GuidanceVector3(
+                    forwardPoint[0] - currentPosition[0],
+                    forwardPoint[1] - currentPosition[1],
+                    forwardPoint[2] - currentPosition[2]
+                )
+                val result = guidanceEngine.calculate(
+                    route = route,
+                    currentPosition = GuidanceVector3(
+                        currentPosition[0], currentPosition[1], currentPosition[2]
+                    ),
+                    currentForward = forward
+                )
+                lastGuidanceResult = result
+                if (result.arrived) guidanceState = GuidanceState.ARRIVED
+            }
+        }
+
+        return lastGuidanceResult.toSnapshot(guidanceState, trackingLost)
+    }
+
+    private fun GuidanceResult?.toSnapshot(
+        state: GuidanceState,
+        trackingLost: Boolean
+    ) = GuidanceSnapshot(
+        state = state,
+        angleDifferenceDegrees = this?.signedAngleDegrees,
+        remainingDistanceMeters = this?.remainingDistanceMeters,
+        progressPercent = this?.progressPercent,
+        trackingLost = trackingLost
+    )
 
     private fun updateDistance(position: FloatArray) {
         if (origin == null) origin = position.copyOf()
@@ -219,13 +316,17 @@ class ArTrackingManager(context: Context) {
                 straightDistance = 0f,
                 framesPerSecond = 0f,
                 marker = markerAnchor.stoppedSnapshot(),
-                recording = routeRecorder.snapshot(savedRouteSummary)
+                recording = routeRecorder.snapshot(savedRouteSummary),
+                guidance = lastGuidanceResult.toSnapshot(
+                    guidanceState,
+                    trackingLost = true
+                )
             )
         )
     }
 
-    private fun loadSavedRouteSummary(): RouteSummary? = try {
-        routeStore.load()?.summary()
+    private fun loadSavedRoute(): RecordedRoute? = try {
+        routeStore.load()
     } catch (_: Exception) {
         null
     }
