@@ -6,6 +6,7 @@ import com.google.ar.core.Frame
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingFailureReason
 import com.google.ar.core.TrackingState
+import com.google.ar.core.exceptions.ImageInsufficientQualityException
 import com.google.ar.core.exceptions.UnavailableApkTooOldException
 import com.google.ar.core.exceptions.UnavailableArcoreNotInstalledException
 import com.google.ar.core.exceptions.UnavailableDeviceNotCompatibleException
@@ -69,6 +70,8 @@ class ArTrackingManager(context: Context) {
             reportError("Google Play 開発者サービス（AR向け）を更新してください。")
         } catch (_: UnavailableSdkTooOldException) {
             reportError("ARCore SDKが古すぎます。アプリを更新してください。")
+        } catch (_: ImageInsufficientQualityException) {
+            reportError("\u30de\u30fc\u30ab\u30fc\u753b\u50cf\u306e\u54c1\u8cea\u304c\u4e0d\u8db3\u3057\u3066\u3044\u307e\u3059")
         } catch (_: Exception) {
             reportError("ARCoreセッションを作成できませんでした。")
         }
