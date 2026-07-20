@@ -6,8 +6,10 @@ import android.content.pm.PackageManager
 import android.graphics.Color
 import android.opengl.GLSurfaceView
 import android.os.Bundle
+import android.view.Gravity
 import android.view.ViewGroup
 import android.view.WindowManager
+import android.widget.Button
 import android.widget.FrameLayout
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.exceptions.UnavailableApkTooOldException
@@ -18,6 +20,7 @@ import com.google.ar.core.exceptions.UnavailableUserDeclinedInstallationExceptio
 class MainActivity : Activity() {
     private lateinit var glSurfaceView: GLSurfaceView
     private lateinit var debugHud: DebugHud
+    private lateinit var recordButton: Button
     private lateinit var trackingManager: ArTrackingManager
     private var installRequested = false
 
@@ -43,7 +46,22 @@ class MainActivity : Activity() {
             renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
         }
         debugHud = DebugHud(this)
-        trackingManager.onSnapshot = { debugHud.update(it) }
+        recordButton = Button(this).apply {
+            text = "マーカーを映してください"
+            isEnabled = false
+            setOnClickListener {
+                if (trackingManager.isRecording) {
+                    trackingManager.stopRecording()
+                } else if (trackingManager.startRecording()) {
+                    text = "記録終了"
+                    isEnabled = true
+                }
+            }
+        }
+        trackingManager.onSnapshot = { snapshot ->
+            debugHud.update(snapshot)
+            runOnUiThread { updateRecordingButton(snapshot) }
+        }
 
         val root = FrameLayout(this).apply {
             setBackgroundColor(Color.BLACK)
@@ -55,6 +73,14 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
+            addView(recordButton, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT,
+                Gravity.BOTTOM
+            ).apply {
+                val margin = (resources.displayMetrics.density * 12).toInt()
+                setMargins(margin, margin, margin, margin)
+            })
         }
         setContentView(root)
 
@@ -97,6 +123,17 @@ class MainActivity : Activity() {
             } else {
                 debugHud.showError("カメラ権限が拒否されました。ARトラッキングにはカメラ権限が必要です。")
             }
+        }
+    }
+
+    private fun updateRecordingButton(snapshot: TrackingSnapshot) {
+        if (snapshot.recording.isRecording) {
+            recordButton.text = "記録終了"
+            recordButton.isEnabled = true
+        } else {
+            val markerRecognized = snapshot.marker.state == MarkerDetectionState.TRACKING
+            recordButton.text = if (markerRecognized) "記録開始" else "マーカーを映してください"
+            recordButton.isEnabled = markerRecognized
         }
     }
 

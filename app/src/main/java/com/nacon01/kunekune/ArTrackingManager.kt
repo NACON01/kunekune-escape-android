@@ -1,4 +1,4 @@
-package com.nacon01.kunekune
+﻿package com.nacon01.kunekune
 
 import android.content.Context
 import com.google.ar.core.Config
@@ -20,12 +20,16 @@ data class TrackingSnapshot(
     val cumulativeDistance: Float,
     val straightDistance: Float,
     val framesPerSecond: Float,
-    val marker: MarkerTrackingSnapshot
+    val marker: MarkerTrackingSnapshot,
+    val recording: RecordingSnapshot
 )
 
 class ArTrackingManager(context: Context) {
     private val appContext = context.applicationContext
     private val markerAnchor = MarkerAnchor(appContext)
+    private val routeRecorder = RouteRecorder()
+    private val routeStore = RouteStore(appContext)
+    private var savedRouteSummary = loadSavedRouteSummary()
     private var session: Session? = null
     private var cameraTextureName: Int? = null
     private var displayRotation = 0
@@ -38,11 +42,35 @@ class ArTrackingManager(context: Context) {
     private var fpsWindowStartNanos = System.nanoTime()
     private var framesPerSecond = 0f
 
+    @Volatile
+    private var latestMarkerState = MarkerDetectionState.NOT_DETECTED
+
     var onSnapshot: ((TrackingSnapshot) -> Unit)? = null
     var onError: ((String) -> Unit)? = null
 
     val hasSession: Boolean
         get() = session != null
+
+    val isRecording: Boolean
+        get() = routeRecorder.isRecording
+
+    fun startRecording(): Boolean {
+        if (routeRecorder.isRecording || latestMarkerState != MarkerDetectionState.TRACKING) return false
+        routeRecorder.start()
+        return true
+    }
+
+    fun stopRecording(): Boolean {
+        val route = routeRecorder.stop() ?: return false
+        return try {
+            routeStore.save(route)
+            savedRouteSummary = route.summary()
+            true
+        } catch (_: Exception) {
+            reportError("経路を保存できませんでした。")
+            false
+        }
+    }
 
     fun createSession(): String? {
         if (session != null) return null
@@ -71,7 +99,7 @@ class ArTrackingManager(context: Context) {
         } catch (_: UnavailableSdkTooOldException) {
             reportError("ARCore SDKが古すぎます。アプリを更新してください。")
         } catch (_: ImageInsufficientQualityException) {
-            reportError("\u30de\u30fc\u30ab\u30fc\u753b\u50cf\u306e\u54c1\u8cea\u304c\u4e0d\u8db3\u3057\u3066\u3044\u307e\u3059")
+            reportError("マーカー画像の品質が不足しています")
         } catch (_: Exception) {
             reportError("ARCoreセッションを作成できませんでした。")
         }
@@ -106,6 +134,7 @@ class ArTrackingManager(context: Context) {
         session?.close()
         session = null
         markerAnchor.close()
+        latestMarkerState = MarkerDetectionState.NOT_DETECTED
         publishStopped()
     }
 
@@ -120,12 +149,20 @@ class ArTrackingManager(context: Context) {
 
         val camera = frame.camera
         val marker = markerAnchor.update(frame)
+        latestMarkerState = marker.state
         updateFps()
         val position = if (camera.trackingState == TrackingState.TRACKING) {
             camera.pose.translation.copyOf().also(::updateDistance)
         } else {
             null
         }
+        val markerPosition = marker.cameraPoseInMarkerSpace?.translation?.let {
+            RoutePosition(it[0], it[1], it[2])
+        }
+        routeRecorder.sample(
+            position = markerPosition,
+            cameraTracking = camera.trackingState == TrackingState.TRACKING
+        )
         val straightDistance = if (position != null && origin != null) {
             origin!!.distanceTo(position)
         } else {
@@ -140,7 +177,8 @@ class ArTrackingManager(context: Context) {
                 cumulativeDistance = cumulativeDistance,
                 straightDistance = straightDistance,
                 framesPerSecond = framesPerSecond,
-                marker = marker
+                marker = marker,
+                recording = routeRecorder.snapshot(savedRouteSummary)
             )
         )
         return frame
@@ -180,9 +218,16 @@ class ArTrackingManager(context: Context) {
                 cumulativeDistance = cumulativeDistance,
                 straightDistance = 0f,
                 framesPerSecond = 0f,
-                marker = markerAnchor.stoppedSnapshot()
+                marker = markerAnchor.stoppedSnapshot(),
+                recording = routeRecorder.snapshot(savedRouteSummary)
             )
         )
+    }
+
+    private fun loadSavedRouteSummary(): RouteSummary? = try {
+        routeStore.load()?.summary()
+    } catch (_: Exception) {
+        null
     }
 
     private fun reportError(message: String): String {

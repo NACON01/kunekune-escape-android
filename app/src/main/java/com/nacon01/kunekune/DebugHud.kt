@@ -1,4 +1,4 @@
-package com.nacon01.kunekune
+﻿package com.nacon01.kunekune
 
 import android.content.Context
 import android.graphics.Color
@@ -66,6 +66,10 @@ class DebugHud(context: Context) : TextView(context) {
         val position = snapshot.position?.let {
             "x=${it[0].formatMeters()}  y=${it[1].formatMeters()}  z=${it[2].formatMeters()}"
         } ?: "x=--  y=--  z=--"
+        val recordingState = if (snapshot.recording.isRecording) "記録中" else "停止"
+        val savedRoute = snapshot.recording.savedRoute?.let {
+            "\n保存済み: ${it.pointCount}点 ${it.totalDistanceMeters.formatRouteDistance()}m"
+        } ?: ""
         return "状態: $state$reason\n" +
             "ポーズ: $position m\n" +
             "累積移動距離: ${snapshot.cumulativeDistance.formatMeters()} m\n" +
@@ -73,7 +77,11 @@ class DebugHud(context: Context) : TextView(context) {
             "FPS: ${snapshot.framesPerSecond.formatFps()}\n" +
             "マーカー: ${markerStateText(snapshot.marker.state)}\n" +
             "マーカーまでの距離: ${snapshot.marker.distanceMeters?.formatMeters() ?: "--"} m\n" +
-            "マーカー座標系: ${markerPositionText(snapshot.marker.cameraPoseInMarkerSpace)} m"
+            "マーカー座標系: ${markerPositionText(snapshot.marker.cameraPoseInMarkerSpace)} m\n" +
+            "記録状態: $recordingState\n" +
+            "記録点数: ${snapshot.recording.pointCount}\n" +
+            "記録中の累積距離: ${snapshot.recording.totalDistanceMeters.formatRouteDistance()}m" +
+            savedRoute
     }
 
     private fun stoppedText() = "状態: STOPPED\nARCoreセッションを開始しています..."
@@ -98,6 +106,8 @@ class DebugHud(context: Context) : TextView(context) {
     } ?: "mx=--  my=--  mz=--"
 
     private fun Float.formatMeters() = String.format(Locale.US, "%.2f", this)
+
+    private fun Float.formatRouteDistance() = String.format(Locale.US, "%.1f", this)
 
     private fun Float.formatFps() = String.format(Locale.US, "%.1f", this)
 }
