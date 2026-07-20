@@ -1,4 +1,4 @@
-﻿package com.nacon01.kunekune
+package com.nacon01.kunekune
 
 import android.content.Context
 import com.google.ar.core.Config
@@ -18,11 +18,13 @@ data class TrackingSnapshot(
     val position: FloatArray?,
     val cumulativeDistance: Float,
     val straightDistance: Float,
-    val framesPerSecond: Float
+    val framesPerSecond: Float,
+    val marker: MarkerTrackingSnapshot
 )
 
 class ArTrackingManager(context: Context) {
     private val appContext = context.applicationContext
+    private val markerAnchor = MarkerAnchor(appContext)
     private var session: Session? = null
     private var cameraTextureName: Int? = null
     private var displayRotation = 0
@@ -50,10 +52,12 @@ class ArTrackingManager(context: Context) {
                 if (displayWidth > 0 && displayHeight > 0) {
                     arSession.setDisplayGeometry(displayRotation, displayWidth, displayHeight)
                 }
-                arSession.configure(Config(arSession).apply {
+                val config = Config(arSession).apply {
                     planeFindingMode = Config.PlaneFindingMode.DISABLED
                     lightEstimationMode = Config.LightEstimationMode.DISABLED
-                })
+                }
+                markerAnchor.configure(config, arSession)
+                arSession.configure(config)
             }
             resetTrackingStats()
             null
@@ -98,6 +102,7 @@ class ArTrackingManager(context: Context) {
     fun close() {
         session?.close()
         session = null
+        markerAnchor.close()
         publishStopped()
     }
 
@@ -111,6 +116,7 @@ class ArTrackingManager(context: Context) {
         }
 
         val camera = frame.camera
+        val marker = markerAnchor.update(frame)
         updateFps()
         val position = if (camera.trackingState == TrackingState.TRACKING) {
             camera.pose.translation.copyOf().also(::updateDistance)
@@ -130,7 +136,8 @@ class ArTrackingManager(context: Context) {
                 position = position,
                 cumulativeDistance = cumulativeDistance,
                 straightDistance = straightDistance,
-                framesPerSecond = framesPerSecond
+                framesPerSecond = framesPerSecond,
+                marker = marker
             )
         )
         return frame
@@ -169,7 +176,8 @@ class ArTrackingManager(context: Context) {
                 position = null,
                 cumulativeDistance = cumulativeDistance,
                 straightDistance = 0f,
-                framesPerSecond = 0f
+                framesPerSecond = 0f,
+                marker = markerAnchor.stoppedSnapshot()
             )
         )
     }
