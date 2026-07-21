@@ -3,6 +3,11 @@
 import android.Manifest
 import android.app.Activity
 import android.content.pm.PackageManager
+import android.content.Intent
+import android.net.Uri
+import android.os.Handler
+import android.os.Looper
+import android.provider.Settings
 import android.graphics.Color
 import android.opengl.GLSurfaceView
 import android.os.Bundle
@@ -25,10 +30,14 @@ class MainActivity : Activity() {
     private lateinit var guidanceView: GuidanceArrowView
     private lateinit var recordButton: Button
     private lateinit var guidanceButton: Button
+    private lateinit var backgroundTrackingButton: Button
     private lateinit var guidanceHint: TextView
     private lateinit var trackingManager: ArTrackingManager
     private var latestGuidanceState = GuidanceState.INACTIVE
     private var installRequested = false
+    private var phase2aPendingStart = false
+    private var phase2aAwaitingNotification = false
+    private var phase2aAwaitingCamera = false
 
     private val renderer by lazy {
         CameraBackgroundRenderer(
@@ -76,6 +85,10 @@ class MainActivity : Activity() {
                 }
             }
         }
+        backgroundTrackingButton = Button(this).apply {
+            text = "2a: 裏で追跡テスト"
+            setOnClickListener { onBackgroundTrackingButtonClicked() }
+        }
         guidanceHint = TextView(this).apply {
             setTextColor(Color.WHITE)
             textSize = 12f
@@ -96,6 +109,10 @@ class MainActivity : Activity() {
         val bottomControls = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(buttonRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            addView(backgroundTrackingButton, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
@@ -138,7 +155,9 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         glSurfaceView.onResume()
-        if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+        if (phase2aPendingStart) {
+            continueBackgroundTrackingStart()
+        } else if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startArCore()
         } else {
             debugHud.showError("カメラ権限が必要です。設定からカメラの使用を許可してください。")
@@ -162,7 +181,22 @@ class MainActivity : Activity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == NOTIFICATION_PERMISSION_REQUEST) {
+            phase2aAwaitingNotification = false
+            continueBackgroundTrackingStart()
+            return
+        }
         if (requestCode == CAMERA_PERMISSION_REQUEST) {
+            phase2aAwaitingCamera = false
+            if (phase2aPendingStart) {
+                if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
+                    continueBackgroundTrackingStart()
+                } else {
+                    phase2aPendingStart = false
+                    debugHud.showError("カメラ権限が拒否されたため、2aを開始できません。")
+                }
+                return
+            }
             if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
                 debugHud.clearError()
                 startArCore()
@@ -170,6 +204,55 @@ class MainActivity : Activity() {
                 debugHud.showError("カメラ権限が拒否されました。ARトラッキングにはカメラ権限が必要です。")
             }
         }
+    }
+
+    private fun onBackgroundTrackingButtonClicked() {
+        if (BackgroundTrackingService.isRunning) {
+            stopService(Intent(this, BackgroundTrackingService::class.java))
+            backgroundTrackingButton.text = "2a: 裏で追跡テスト"
+            Handler(Looper.getMainLooper()).postDelayed({
+                if (!BackgroundTrackingService.isRunning) trackingManager.resume()
+            }, 300L)
+            return
+        }
+        phase2aPendingStart = true
+        continueBackgroundTrackingStart()
+    }
+
+    private fun continueBackgroundTrackingStart() {
+        if (!phase2aPendingStart) return
+        if (!Settings.canDrawOverlays(this)) {
+            startActivity(Intent(
+                Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                Uri.parse("package:$packageName")
+            ))
+            return
+        }
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
+        ) {
+            if (!phase2aAwaitingNotification) {
+                phase2aAwaitingNotification = true
+                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), NOTIFICATION_PERMISSION_REQUEST)
+            }
+            return
+        }
+        if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+            if (!phase2aAwaitingCamera) {
+                phase2aAwaitingCamera = true
+                requestPermissions(arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION_REQUEST)
+            }
+            return
+        }
+        phase2aPendingStart = false
+        trackingManager.pause()
+        val serviceIntent = Intent(this, BackgroundTrackingService::class.java)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            startForegroundService(serviceIntent)
+        } else {
+            startService(serviceIntent)
+        }
+        backgroundTrackingButton.text = "2a: テスト停止"
     }
 
     private fun updateControls(snapshot: TrackingSnapshot) {
@@ -241,5 +324,6 @@ class MainActivity : Activity() {
 
     companion object {
         private const val CAMERA_PERMISSION_REQUEST = 1001
+        private const val NOTIFICATION_PERMISSION_REQUEST = 1002
     }
 }
