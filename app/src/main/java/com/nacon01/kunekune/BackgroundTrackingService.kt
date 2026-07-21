@@ -20,6 +20,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.HandlerThread
 import android.os.IBinder
+import android.os.Looper
 import android.provider.Settings
 import android.util.Log
 import com.google.ar.core.Config
@@ -30,7 +31,7 @@ import java.util.concurrent.TimeUnit
 import kotlin.math.hypot
 
 class BackgroundTrackingService : Service() {
-    private val mainHandler = Handler(mainLooper)
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var workerThread: HandlerThread? = null
     private var workerHandler: Handler? = null
     private var running = false
