@@ -27,7 +27,8 @@ data class GuidanceOverlaySnapshot(
         progressPercent = null,
         trackingLost = false
     ),
-    val errorMessage: String? = null
+    val errorMessage: String? = null,
+    val arcDistanceMeters: Float? = null
 )
 
 class GuidanceOverlay(context: Context) : FrameLayout(context.applicationContext) {

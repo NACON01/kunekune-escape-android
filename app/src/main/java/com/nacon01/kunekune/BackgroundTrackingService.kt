@@ -38,8 +38,10 @@ class BackgroundTrackingService : Service() {
     private var running = false
     private var trackingOverlay: TrackingOverlay? = null
     private var guidanceOverlay: GuidanceOverlay? = null
+    private var scrimOverlay: ScrimOverlay? = null
     private var guidanceMode = false
     private val guidanceEngine = GuidanceEngine()
+    private val fadeController = FadeController()
 
     override fun onCreate() {
         super.onCreate()
@@ -49,6 +51,7 @@ class BackgroundTrackingService : Service() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_START_GUIDANCE && workerThread == null) {
             guidanceMode = true
+            fadeController.reset()
         }
         when (intent?.action) {
             ACTION_STOP -> {
@@ -57,7 +60,10 @@ class BackgroundTrackingService : Service() {
             }
             ACTION_TOGGLE_OVERLAY -> {
                 mainHandler.post {
-                    if (guidanceMode) guidanceOverlay?.toggleVisibility()
+                    if (guidanceMode) {
+                        guidanceOverlay?.toggleVisibility()
+                        scrimOverlay?.toggleVisibility()
+                    }
                     else trackingOverlay?.toggleVisibility()
                 }
                 return START_NOT_STICKY
@@ -75,12 +81,18 @@ class BackgroundTrackingService : Service() {
         workerThread?.join(TimeUnit.SECONDS.toMillis(2))
         workerHandler = null
         workerThread = null
+        val trackingOverlayToRemove = trackingOverlay
+        val guidanceOverlayToRemove = guidanceOverlay
+        val scrimOverlayToRemove = scrimOverlay
         mainHandler.post {
-            trackingOverlay?.remove()
-            guidanceOverlay?.remove()
+            trackingOverlayToRemove?.remove()
+            guidanceOverlayToRemove?.remove()
+            scrimOverlayToRemove?.remove()
         }
         trackingOverlay = null
         guidanceOverlay = null
+        scrimOverlay = null
+        fadeController.reset()
         isRunning = false
         super.onDestroy()
     }
@@ -119,6 +131,9 @@ class BackgroundTrackingService : Service() {
         }
         try {
             if (guidanceMode) {
+                // 先に膜を追加し、矢印をその前面へ置く。
+                if (scrimOverlay == null) scrimOverlay = ScrimOverlay(this)
+                scrimOverlay?.show()
                 if (guidanceOverlay == null) guidanceOverlay = GuidanceOverlay(this)
                 guidanceOverlay?.show()
             } else {
@@ -180,6 +195,7 @@ class BackgroundTrackingService : Service() {
         route: RecordedRoute?
     ) {
         val startedAt = System.nanoTime()
+        var previousFrameNanos = startedAt
         var origin: FloatArray? = null
         var frames = 0
         var rateStart = startedAt
@@ -189,6 +205,8 @@ class BackgroundTrackingService : Service() {
             try {
                 val frame = session.update()
                 val now = System.nanoTime()
+                val dtSeconds = ((now - previousFrameNanos).coerceAtLeast(0L)) / 1_000_000_000f
+                previousFrameNanos = now
                 frames++
                 if (now - rateStart >= 1_000_000_000L) {
                     rateHz = frames * 1_000_000_000f / (now - rateStart)
@@ -198,7 +216,13 @@ class BackgroundTrackingService : Service() {
                 val camera = frame.camera
                 if (guidanceMode) {
                     val marker = markerAnchor?.update(frame)
-                    publishGuidance(guidanceSnapshot(camera, marker, route))
+                    val snapshot = guidanceSnapshot(camera, marker, route)
+                    val density = fadeController.update(
+                        isGuiding = snapshot.state == GuidanceOverlayState.GUIDING,
+                        arcDistanceMeters = snapshot.arcDistanceMeters ?: 0f,
+                        dtSeconds = dtSeconds
+                    )
+                    publishGuidance(snapshot, density)
                 } else {
                     val tracking = camera.trackingState == TrackingState.TRACKING
                     val position = camera.pose.translation.copyOf()
@@ -217,13 +241,17 @@ class BackgroundTrackingService : Service() {
                 }
             } catch (exception: Exception) {
                 Log.e(TAG, "ARCore update() failed", exception)
+                val now = System.nanoTime()
+                val dtSeconds = ((now - previousFrameNanos).coerceAtLeast(0L)) / 1_000_000_000f
+                previousFrameNanos = now
                 if (guidanceMode) {
-                    publishGuidance(GuidanceOverlaySnapshot(
+                    val snapshot = GuidanceOverlaySnapshot(
                         state = GuidanceOverlayState.ERROR,
                         errorMessage = exceptionMessage(exception)
-                    ))
+                    )
+                    val density = fadeController.update(false, 0f, dtSeconds)
+                    publishGuidance(snapshot, density)
                 } else {
-                    val now = System.nanoTime()
                     publish(TrackingOverlaySnapshot(
                         state = "ERROR",
                         updateRateHz = rateHz,
@@ -287,7 +315,8 @@ class BackgroundTrackingService : Service() {
                 remainingDistanceMeters = result.remainingDistanceMeters,
                 progressPercent = result.progressPercent,
                 trackingLost = false
-            )
+            ),
+            arcDistanceMeters = result.projectedDistanceMeters
         )
     }
 
@@ -344,8 +373,15 @@ class BackgroundTrackingService : Service() {
         mainHandler.post { trackingOverlay?.update(snapshot) }
     }
 
-    private fun publishGuidance(snapshot: GuidanceOverlaySnapshot) {
-        mainHandler.post { guidanceOverlay?.update(snapshot) }
+    private fun publishGuidance(snapshot: GuidanceOverlaySnapshot, density: Float = 0f) {
+        mainHandler.post {
+            guidanceOverlay?.update(snapshot)
+            if (snapshot.state == GuidanceOverlayState.ARRIVED) {
+                scrimOverlay?.remove()
+            } else {
+                scrimOverlay?.updateDensity(density)
+            }
+        }
     }
 
     private fun showError(message: String) {
