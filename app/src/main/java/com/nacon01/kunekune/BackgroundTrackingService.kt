@@ -253,8 +253,10 @@ class BackgroundTrackingService : Service() {
         if (camera.trackingState != TrackingState.TRACKING) {
             return GuidanceOverlaySnapshot(GuidanceOverlayState.TRACKING_PAUSED)
         }
+        // 一度アンカーを確立できたら(markerPoseが非null)、以降マーカーが視界から
+        // 外れてもVIOがアンカーを維持するので誘導を継続する。未検出のときだけ照準を促す。
         val markerPose = marker?.markerPoseInWorld
-        if (marker?.state != MarkerDetectionState.TRACKING || markerPose == null) {
+        if (markerPose == null) {
             return GuidanceOverlaySnapshot(GuidanceOverlayState.SEARCHING_MARKER)
         }
 

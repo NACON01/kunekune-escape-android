@@ -66,7 +66,12 @@ class GuidanceArrowView(
         } else {
             height / 2f - arrowSize
         }
-        val color = if (guidance.trackingLost) Color.GRAY else Color.rgb(40, 220, 255)
+        // 背後のコンテンツを妨げないよう矢印自体も半透明にする。
+        val color = if (guidance.trackingLost) {
+            Color.argb(ARROW_ALPHA, 170, 170, 170)
+        } else {
+            Color.argb(ARROW_ALPHA, 40, 220, 255)
+        }
         arrowPaint.color = color
 
         canvas.save()
@@ -141,6 +146,7 @@ class GuidanceArrowView(
 
     companion object {
         private const val EMA_ALPHA = 0.18f
+        private const val ARROW_ALPHA = 165
         private const val ARROW_SIZE = 72f
         private const val DISTANCE_TEXT_SIZE = 28f
         private const val LOST_TEXT_SIZE = 22f
