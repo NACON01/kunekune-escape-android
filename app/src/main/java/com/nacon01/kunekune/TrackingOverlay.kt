@@ -7,6 +7,7 @@ import android.os.Build
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.view.Gravity
+import android.view.View
 import android.view.WindowManager
 import android.widget.TextView
 import java.util.Locale
@@ -59,6 +60,11 @@ class TrackingOverlay(context: Context) : TextView(context.applicationContext) {
                 System.lineSeparator() + "経過: " + snapshot.elapsedSeconds + " 秒" +
                 (snapshot.errorMessage?.let { System.lineSeparator() + "エラー: " + it } ?: "")
         }
+    }
+
+    fun toggleVisibility() {
+        if (!attached) return
+        visibility = if (visibility == View.VISIBLE) View.GONE else View.VISIBLE
     }
 
     fun remove() {

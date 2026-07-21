@@ -51,9 +51,15 @@ class BackgroundTrackingService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == ACTION_STOP) {
-            stopSelfResult(startId)
-            return START_NOT_STICKY
+        when (intent?.action) {
+            ACTION_STOP -> {
+                stopSelfResult(startId)
+                return START_NOT_STICKY
+            }
+            ACTION_TOGGLE_OVERLAY -> {
+                mainHandler.post { overlay?.toggleVisibility() }
+                return START_NOT_STICKY
+            }
         }
         startForegroundCompat()
         if (workerThread == null) startTracking()
@@ -76,10 +82,12 @@ class BackgroundTrackingService : Service() {
 
     companion object {
         const val ACTION_STOP = "com.nacon01.kunekune.action.STOP_BACKGROUND_TRACKING"
+        const val ACTION_TOGGLE_OVERLAY = "com.nacon01.kunekune.action.TOGGLE_OVERLAY"
         private const val CHANNEL_ID = "background_tracking_2a"
         private const val NOTIFICATION_ID = 2001
         private const val REQUEST_OPEN = 2002
         private const val REQUEST_STOP = 2003
+        private const val REQUEST_TOGGLE = 2004
         private const val TAG = "BackgroundTracking"
 
         @Volatile
@@ -188,12 +196,18 @@ class BackgroundTrackingService : Service() {
             this, REQUEST_OPEN, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+        val toggleIntent = Intent(this, BackgroundTrackingService::class.java).setAction(ACTION_TOGGLE_OVERLAY)
+        val togglePending = PendingIntent.getService(
+            this, REQUEST_TOGGLE, toggleIntent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
         val notification = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setContentTitle("2a 裏で追跡テスト")
             .setContentText("ARCoreのVIOトラッキングを実行中")
             .setContentIntent(openPending)
             .setOngoing(true)
+            .addAction(Notification.Action.Builder(null, "表示切替", togglePending).build())
             .addAction(Notification.Action.Builder(null, "停止", stopPending).build())
             .build()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
