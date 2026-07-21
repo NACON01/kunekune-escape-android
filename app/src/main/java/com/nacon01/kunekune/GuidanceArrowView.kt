@@ -9,7 +9,10 @@ import android.view.View
 import java.util.Locale
 import kotlin.math.abs
 
-class GuidanceArrowView(context: Context) : View(context) {
+class GuidanceArrowView(
+    context: Context,
+    private val compact: Boolean = false
+) : View(context) {
     private val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         style = Paint.Style.FILL
     }
@@ -57,36 +60,63 @@ class GuidanceArrowView(context: Context) : View(context) {
 
     private fun drawGuidance(canvas: Canvas) {
         val centerX = width / 2f
-        val centerY = height / 2f - ARROW_SIZE
+        val arrowSize = arrowSize()
+        val centerY = if (compact) {
+            arrowSize + COMPACT_TOP_OFFSET_DP * resources.displayMetrics.density
+        } else {
+            height / 2f - arrowSize
+        }
         val color = if (guidance.trackingLost) Color.GRAY else Color.rgb(40, 220, 255)
         arrowPaint.color = color
 
         canvas.save()
         canvas.rotate(-smoothedAngle, centerX, centerY)
         val path = Path().apply {
-            moveTo(centerX, centerY - ARROW_SIZE)
-            lineTo(centerX - ARROW_SIZE * 0.62f, centerY + ARROW_SIZE * 0.35f)
-            lineTo(centerX - ARROW_SIZE * 0.18f, centerY + ARROW_SIZE * 0.2f)
-            lineTo(centerX - ARROW_SIZE * 0.18f, centerY + ARROW_SIZE)
-            lineTo(centerX + ARROW_SIZE * 0.18f, centerY + ARROW_SIZE)
-            lineTo(centerX + ARROW_SIZE * 0.18f, centerY + ARROW_SIZE * 0.2f)
-            lineTo(centerX + ARROW_SIZE * 0.62f, centerY + ARROW_SIZE * 0.35f)
+            moveTo(centerX, centerY - arrowSize)
+            lineTo(centerX - arrowSize * 0.62f, centerY + arrowSize * 0.35f)
+            lineTo(centerX - arrowSize * 0.18f, centerY + arrowSize * 0.2f)
+            lineTo(centerX - arrowSize * 0.18f, centerY + arrowSize)
+            lineTo(centerX + arrowSize * 0.18f, centerY + arrowSize)
+            lineTo(centerX + arrowSize * 0.18f, centerY + arrowSize * 0.2f)
+            lineTo(centerX + arrowSize * 0.62f, centerY + arrowSize * 0.35f)
             close()
         }
         canvas.drawPath(path, arrowPaint)
         canvas.restore()
 
         textPaint.color = color
-        textPaint.textSize = DISTANCE_TEXT_SIZE
+        textPaint.textSize = if (compact) {
+            COMPACT_DISTANCE_TEXT_SP * resources.displayMetrics.scaledDensity
+        } else {
+            DISTANCE_TEXT_SIZE
+        }
         val remaining = guidance.remainingDistanceMeters?.let {
             String.format(Locale.US, "%.1f m", it)
         } ?: "--.- m"
-        canvas.drawText(remaining, centerX, centerY + ARROW_SIZE + 58f, textPaint)
+        val distanceOffset = if (compact) {
+            COMPACT_DISTANCE_OFFSET_DP * resources.displayMetrics.density
+        } else {
+            58f
+        }
+        canvas.drawText(remaining, centerX, centerY + arrowSize + distanceOffset, textPaint)
 
         if (guidance.trackingLost) {
             textPaint.color = Color.WHITE
-            textPaint.textSize = LOST_TEXT_SIZE
-            canvas.drawText("トラッキング喪失", centerX, centerY + ARROW_SIZE + 100f, textPaint)
+            textPaint.textSize = if (compact) {
+                COMPACT_LOST_TEXT_SP * resources.displayMetrics.scaledDensity
+            } else {
+                LOST_TEXT_SIZE
+            }
+            canvas.drawText(
+                "トラッキング喪失",
+                centerX,
+                centerY + arrowSize + if (compact) {
+                    COMPACT_LOST_OFFSET_DP * resources.displayMetrics.density
+                } else {
+                    100f
+                },
+                textPaint
+            )
         }
     }
 
@@ -103,11 +133,22 @@ class GuidanceArrowView(context: Context) : View(context) {
         return result
     }
 
+    private fun arrowSize(): Float = if (compact) {
+        (width * 0.5f).coerceAtLeast(1f)
+    } else {
+        ARROW_SIZE
+    }
+
     companion object {
         private const val EMA_ALPHA = 0.18f
         private const val ARROW_SIZE = 72f
         private const val DISTANCE_TEXT_SIZE = 28f
         private const val LOST_TEXT_SIZE = 22f
         private const val ARRIVED_TEXT_SIZE = 52f
+        private const val COMPACT_TOP_OFFSET_DP = 28f
+        private const val COMPACT_DISTANCE_OFFSET_DP = 18f
+        private const val COMPACT_LOST_OFFSET_DP = 42f
+        private const val COMPACT_DISTANCE_TEXT_SP = 11f
+        private const val COMPACT_LOST_TEXT_SP = 10f
     }
 }

@@ -31,6 +31,7 @@ class MainActivity : Activity() {
     private lateinit var recordButton: Button
     private lateinit var guidanceButton: Button
     private lateinit var backgroundTrackingButton: Button
+    private lateinit var departureButton: Button
     private lateinit var guidanceHint: TextView
     private lateinit var trackingManager: ArTrackingManager
     private var latestGuidanceState = GuidanceState.INACTIVE
@@ -38,6 +39,7 @@ class MainActivity : Activity() {
     private var phase2aPendingStart = false
     private var phase2aAwaitingNotification = false
     private var phase2aAwaitingCamera = false
+    private var guidancePendingStart = false
 
     private val renderer by lazy {
         CameraBackgroundRenderer(
@@ -89,6 +91,10 @@ class MainActivity : Activity() {
             text = "2a: 裏で追跡テスト"
             setOnClickListener { onBackgroundTrackingButtonClicked() }
         }
+        departureButton = Button(this).apply {
+            text = "離脱開始"
+            setOnClickListener { onDepartureButtonClicked() }
+        }
         guidanceHint = TextView(this).apply {
             setTextColor(Color.WHITE)
             textSize = 12f
@@ -113,6 +119,10 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
             addView(backgroundTrackingButton, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            addView(departureButton, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
@@ -155,7 +165,7 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         glSurfaceView.onResume()
-        if (phase2aPendingStart) {
+        if (phase2aPendingStart || guidancePendingStart) {
             continueBackgroundTrackingStart()
         } else if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startArCore()
@@ -188,11 +198,12 @@ class MainActivity : Activity() {
         }
         if (requestCode == CAMERA_PERMISSION_REQUEST) {
             phase2aAwaitingCamera = false
-            if (phase2aPendingStart) {
+            if (phase2aPendingStart || guidancePendingStart) {
                 if (grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
                     continueBackgroundTrackingStart()
                 } else {
                     phase2aPendingStart = false
+                    guidancePendingStart = false
                     debugHud.showError("カメラ権限が拒否されたため、2aを開始できません。")
                 }
                 return
@@ -219,8 +230,30 @@ class MainActivity : Activity() {
         continueBackgroundTrackingStart()
     }
 
+    private fun onDepartureButtonClicked() {
+        val savedRoute = try {
+            RouteStore(this).load()
+        } catch (_: Exception) {
+            null
+        }
+        if (savedRoute?.points.isNullOrEmpty()) {
+            guidanceHint.text = "保存済み経路がないため離脱できません"
+            return
+        }
+
+        guidancePendingStart = true
+        if (BackgroundTrackingService.isRunning) {
+            stopService(Intent(this, BackgroundTrackingService::class.java))
+            Handler(Looper.getMainLooper()).postDelayed({
+                continueBackgroundTrackingStart()
+            }, 350L)
+        } else {
+            continueBackgroundTrackingStart()
+        }
+    }
+
     private fun continueBackgroundTrackingStart() {
-        if (!phase2aPendingStart) return
+        if (!phase2aPendingStart && !guidancePendingStart) return
         if (!Settings.canDrawOverlays(this)) {
             startActivity(Intent(
                 Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
@@ -244,15 +277,29 @@ class MainActivity : Activity() {
             }
             return
         }
+        val startGuidance = guidancePendingStart
         phase2aPendingStart = false
-        trackingManager.pause()
-        val serviceIntent = Intent(this, BackgroundTrackingService::class.java)
+        guidancePendingStart = false
+        if (startGuidance) {
+            glSurfaceView.onPause()
+            trackingManager.close()
+        } else {
+            trackingManager.pause()
+        }
+        val serviceIntent = Intent(this, BackgroundTrackingService::class.java).apply {
+            if (startGuidance) action = BackgroundTrackingService.ACTION_START_GUIDANCE
+        }
         if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
             startForegroundService(serviceIntent)
         } else {
             startService(serviceIntent)
         }
-        backgroundTrackingButton.text = "2a: テスト停止"
+        if (startGuidance) {
+            departureButton.text = "誘導サービス実行中"
+            moveTaskToBack(true)
+        } else {
+            backgroundTrackingButton.text = "2a: テスト停止"
+        }
     }
 
     private fun updateControls(snapshot: TrackingSnapshot) {

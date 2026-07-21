@@ -23,6 +23,7 @@ import android.os.IBinder
 import android.os.Looper
 import android.provider.Settings
 import android.util.Log
+import com.google.ar.core.Camera
 import com.google.ar.core.Config
 import com.google.ar.core.Session
 import com.google.ar.core.TrackingFailureReason
@@ -35,32 +36,34 @@ class BackgroundTrackingService : Service() {
     private var workerThread: HandlerThread? = null
     private var workerHandler: Handler? = null
     private var running = false
-    private var overlay: TrackingOverlay? = null
+    private var trackingOverlay: TrackingOverlay? = null
+    private var guidanceOverlay: GuidanceOverlay? = null
+    private var guidanceMode = false
+    private val guidanceEngine = GuidanceEngine()
 
     override fun onCreate() {
         super.onCreate()
         createNotificationChannel()
-        overlay = TrackingOverlay(this)
-        if (Settings.canDrawOverlays(this)) {
-            try { overlay?.show() } catch (exception: Exception) {
-                showError("オーバーレイ表示失敗: " + exception.message)
-            }
-        } else {
-            showError("SYSTEM_ALERT_WINDOW権限がありません")
-        }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (intent?.action == ACTION_START_GUIDANCE && workerThread == null) {
+            guidanceMode = true
+        }
         when (intent?.action) {
             ACTION_STOP -> {
                 stopSelfResult(startId)
                 return START_NOT_STICKY
             }
             ACTION_TOGGLE_OVERLAY -> {
-                mainHandler.post { overlay?.toggleVisibility() }
+                mainHandler.post {
+                    if (guidanceMode) guidanceOverlay?.toggleVisibility()
+                    else trackingOverlay?.toggleVisibility()
+                }
                 return START_NOT_STICKY
             }
         }
+        ensureOverlay()
         startForegroundCompat()
         if (workerThread == null) startTracking()
         return START_NOT_STICKY
@@ -72,8 +75,12 @@ class BackgroundTrackingService : Service() {
         workerThread?.join(TimeUnit.SECONDS.toMillis(2))
         workerHandler = null
         workerThread = null
-        mainHandler.post { overlay?.remove() }
-        overlay = null
+        mainHandler.post {
+            trackingOverlay?.remove()
+            guidanceOverlay?.remove()
+        }
+        trackingOverlay = null
+        guidanceOverlay = null
         isRunning = false
         super.onDestroy()
     }
@@ -83,6 +90,7 @@ class BackgroundTrackingService : Service() {
     companion object {
         const val ACTION_STOP = "com.nacon01.kunekune.action.STOP_BACKGROUND_TRACKING"
         const val ACTION_TOGGLE_OVERLAY = "com.nacon01.kunekune.action.TOGGLE_OVERLAY"
+        const val ACTION_START_GUIDANCE = "com.nacon01.kunekune.action.START_GUIDANCE"
         private const val CHANNEL_ID = "background_tracking_2a"
         private const val NOTIFICATION_ID = 2001
         private const val REQUEST_OPEN = 2002
@@ -97,34 +105,65 @@ class BackgroundTrackingService : Service() {
 
     private fun startTracking() {
         running = true
-        val thread = HandlerThread("2a-arcore-vio").also { it.start() }
+        val threadName = if (guidanceMode) "2b-arcore-guidance" else "2a-arcore-vio"
+        val thread = HandlerThread(threadName).also { it.start() }
         workerThread = thread
         workerHandler = Handler(thread.looper)
         workerHandler?.post { runTrackingLoop() }
     }
 
+    private fun ensureOverlay() {
+        if (!Settings.canDrawOverlays(this)) {
+            showError("オーバーレイ権限が必要です")
+            return
+        }
+        try {
+            if (guidanceMode) {
+                if (guidanceOverlay == null) guidanceOverlay = GuidanceOverlay(this)
+                guidanceOverlay?.show()
+            } else {
+                if (trackingOverlay == null) trackingOverlay = TrackingOverlay(this)
+                trackingOverlay?.show()
+            }
+        } catch (exception: Exception) {
+            showError("オーバーレイを表示できません: ${exception.message}")
+        }
+    }
+
     private fun runTrackingLoop() {
         var egl: HeadlessEgl? = null
         var session: Session? = null
+        var markerAnchor: MarkerAnchor? = null
+        var route: RecordedRoute? = null
         try {
             if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
                 showError("カメラ権限がありません")
                 return
             }
+            if (guidanceMode) {
+                markerAnchor = MarkerAnchor(applicationContext)
+                route = loadRoute()
+                if (route?.points.isNullOrEmpty()) {
+                    publishGuidance(GuidanceOverlaySnapshot(GuidanceOverlayState.NO_ROUTE))
+                }
+            }
             egl = HeadlessEgl().also { it.create() }
             session = Session(applicationContext).also { arSession ->
                 arSession.setCameraTextureName(egl!!.textureName)
-                arSession.configure(Config(arSession).apply {
+                val config = Config(arSession).apply {
                     planeFindingMode = Config.PlaneFindingMode.DISABLED
                     lightEstimationMode = Config.LightEstimationMode.DISABLED
-                })
+                }
+                markerAnchor?.configure(config, arSession)
+                arSession.configure(config)
                 arSession.resume()
             }
-            runUpdateLoop(session!!)
+            runUpdateLoop(session!!, markerAnchor, route)
         } catch (exception: Exception) {
             Log.e(TAG, "headless ARCore startup failed", exception)
             showError(exceptionMessage(exception))
         } finally {
+            markerAnchor?.close()
             try { session?.pause() } catch (exception: Exception) {
                 Log.w(TAG, "pause failed", exception)
             }
@@ -135,7 +174,11 @@ class BackgroundTrackingService : Service() {
         }
     }
 
-    private fun runUpdateLoop(session: Session) {
+    private fun runUpdateLoop(
+        session: Session,
+        markerAnchor: MarkerAnchor?,
+        route: RecordedRoute?
+    ) {
         val startedAt = System.nanoTime()
         var origin: FloatArray? = null
         var frames = 0
@@ -153,29 +196,41 @@ class BackgroundTrackingService : Service() {
                     rateStart = now
                 }
                 val camera = frame.camera
-                val tracking = camera.trackingState == TrackingState.TRACKING
-                val position = camera.pose.translation.copyOf()
-                if (tracking && origin == null) origin = position.copyOf()
-                val distance = if (tracking && origin != null) origin!!.distanceTo(position) else null
-                publish(TrackingOverlaySnapshot(
-                    state = stateText(camera.trackingState),
-                    failureReason = if (camera.trackingState == TrackingState.PAUSED) {
-                        reasonText(camera.trackingFailureReason)
-                    } else null,
-                    position = if (tracking) position else null,
-                    straightDistance = distance,
-                    updateRateHz = rateHz,
-                    elapsedSeconds = (now - startedAt) / 1_000_000_000f
-                ))
+                if (guidanceMode) {
+                    val marker = markerAnchor?.update(frame)
+                    publishGuidance(guidanceSnapshot(camera, marker, route))
+                } else {
+                    val tracking = camera.trackingState == TrackingState.TRACKING
+                    val position = camera.pose.translation.copyOf()
+                    if (tracking && origin == null) origin = position.copyOf()
+                    val distance = if (tracking && origin != null) origin!!.distanceTo(position) else null
+                    publish(TrackingOverlaySnapshot(
+                        state = stateText(camera.trackingState),
+                        failureReason = if (camera.trackingState == TrackingState.PAUSED) {
+                            reasonText(camera.trackingFailureReason)
+                        } else null,
+                        position = if (tracking) position else null,
+                        straightDistance = distance,
+                        updateRateHz = rateHz,
+                        elapsedSeconds = (now - startedAt) / 1_000_000_000f
+                    ))
+                }
             } catch (exception: Exception) {
                 Log.e(TAG, "ARCore update() failed", exception)
-                val now = System.nanoTime()
-                publish(TrackingOverlaySnapshot(
-                    state = "ERROR",
-                    updateRateHz = rateHz,
-                    elapsedSeconds = (now - startedAt) / 1_000_000_000f,
-                    errorMessage = exceptionMessage(exception)
-                ))
+                if (guidanceMode) {
+                    publishGuidance(GuidanceOverlaySnapshot(
+                        state = GuidanceOverlayState.ERROR,
+                        errorMessage = exceptionMessage(exception)
+                    ))
+                } else {
+                    val now = System.nanoTime()
+                    publish(TrackingOverlaySnapshot(
+                        state = "ERROR",
+                        updateRateHz = rateHz,
+                        elapsedSeconds = (now - startedAt) / 1_000_000_000f,
+                        errorMessage = exceptionMessage(exception)
+                    ))
+                }
             }
             val remaining = 33_333_333L - (System.nanoTime() - loopStart)
             if (remaining > 0) {
@@ -184,6 +239,61 @@ class BackgroundTrackingService : Service() {
                 }
             }
         }
+    }
+
+    private fun guidanceSnapshot(
+        camera: Camera,
+        marker: MarkerTrackingSnapshot?,
+        route: RecordedRoute?
+    ): GuidanceOverlaySnapshot {
+        val savedRoute = route
+        if (savedRoute?.points.isNullOrEmpty()) {
+            return GuidanceOverlaySnapshot(GuidanceOverlayState.NO_ROUTE)
+        }
+        if (camera.trackingState != TrackingState.TRACKING) {
+            return GuidanceOverlaySnapshot(GuidanceOverlayState.TRACKING_PAUSED)
+        }
+        val markerPose = marker?.markerPoseInWorld
+        if (marker?.state != MarkerDetectionState.TRACKING || markerPose == null) {
+            return GuidanceOverlaySnapshot(GuidanceOverlayState.SEARCHING_MARKER)
+        }
+
+        val currentPosition = camera.pose.translation
+        val worldRoute = savedRoute!!.points.map { point ->
+            val world = markerPose.transformPoint(floatArrayOf(point.x, point.y, point.z))
+            GuidanceVector3(world[0], world[1], world[2])
+        }
+        val forwardPoint = camera.pose.transformPoint(floatArrayOf(0f, 0f, -1f))
+        val currentForward = GuidanceVector3(
+            forwardPoint[0] - currentPosition[0],
+            forwardPoint[1] - currentPosition[1],
+            forwardPoint[2] - currentPosition[2]
+        )
+        val result = guidanceEngine.calculate(
+            route = worldRoute,
+            currentPosition = GuidanceVector3(
+                currentPosition[0], currentPosition[1], currentPosition[2]
+            ),
+            currentForward = currentForward
+        )
+        val state = if (result.arrived) GuidanceOverlayState.ARRIVED else GuidanceOverlayState.GUIDING
+        return GuidanceOverlaySnapshot(
+            state = state,
+            guidance = GuidanceSnapshot(
+                state = if (result.arrived) GuidanceState.ARRIVED else GuidanceState.GUIDING,
+                angleDifferenceDegrees = result.signedAngleDegrees,
+                remainingDistanceMeters = result.remainingDistanceMeters,
+                progressPercent = result.progressPercent,
+                trackingLost = false
+            )
+        )
+    }
+
+    private fun loadRoute(): RecordedRoute? = try {
+        RouteStore(applicationContext).load()
+    } catch (exception: Exception) {
+        Log.w(TAG, "route load failed", exception)
+        null
     }
 
     private fun startForegroundCompat() {
@@ -196,15 +306,18 @@ class BackgroundTrackingService : Service() {
             this, REQUEST_OPEN, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
-        val toggleIntent = Intent(this, BackgroundTrackingService::class.java).setAction(ACTION_TOGGLE_OVERLAY)
+        val toggleIntent = Intent(this, BackgroundTrackingService::class.java)
+            .setAction(ACTION_TOGGLE_OVERLAY)
         val togglePending = PendingIntent.getService(
             this, REQUEST_TOGGLE, toggleIntent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
+        val title = if (guidanceMode) "2b バックグラウンド誘導" else "2a バックグラウンド追跡"
+        val content = if (guidanceMode) "マーカーを検出して経路を案内中" else "ARCoreのVIOトラッキングを実行中"
         val notification = Notification.Builder(this, CHANNEL_ID)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
-            .setContentTitle("2a 裏で追跡テスト")
-            .setContentText("ARCoreのVIOトラッキングを実行中")
+            .setContentTitle(title)
+            .setContentText(content)
             .setContentIntent(openPending)
             .setOngoing(true)
             .addAction(Notification.Action.Builder(null, "表示切替", togglePending).build())
@@ -221,16 +334,24 @@ class BackgroundTrackingService : Service() {
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         getSystemService(NotificationManager::class.java).createNotificationChannel(
-            NotificationChannel(CHANNEL_ID, "2a 裏で追跡テスト", NotificationManager.IMPORTANCE_LOW)
+            NotificationChannel(CHANNEL_ID, "バックグラウンドAR", NotificationManager.IMPORTANCE_LOW)
         )
     }
 
     private fun publish(snapshot: TrackingOverlaySnapshot) {
-        mainHandler.post { overlay?.update(snapshot) }
+        mainHandler.post { trackingOverlay?.update(snapshot) }
+    }
+
+    private fun publishGuidance(snapshot: GuidanceOverlaySnapshot) {
+        mainHandler.post { guidanceOverlay?.update(snapshot) }
     }
 
     private fun showError(message: String) {
-        publish(TrackingOverlaySnapshot("ERROR", errorMessage = message))
+        if (guidanceMode) {
+            publishGuidance(GuidanceOverlaySnapshot(GuidanceOverlayState.ERROR, errorMessage = message))
+        } else {
+            publish(TrackingOverlaySnapshot("ERROR", errorMessage = message))
+        }
     }
 
     private fun exceptionMessage(exception: Exception): String {
