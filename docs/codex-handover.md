@@ -25,7 +25,7 @@
 
 ### Web版からネイティブへの転換
 - 旧Web版(`C:\Users\junno\Projects\kunekune-escape`、Vite+TS)はPDRベースで精度不足。コンセプト実証・演出ロジックの参照元として残置。
-- ネイティブ化により、UWB(端末非対応で不採用)、ARCore Cloud Anchors、実アプリへのオーバーレイ介入、UsageStatsManagerによる自動発動が解禁される。
+- ネイティブ化により、ARCore、実アプリへのオーバーレイ介入、UsageStatsManagerによる利用検知が可能になる。ただし targetSdk 34 のカメラFGSは while-in-use 制約があるため、検知だけでバックグラウンドからカメラを自動起動する設計にはできない。
 
 ### 「道1」vs「道2」の分岐(重要)
 本物のログイン済みYouTubeでパーソナライズされたShortsを対象にしたい、という要求から:
@@ -33,7 +33,7 @@
 - **道1(却下)**: WebViewにYouTube埋め込み + 位置ドリフト演出。→ GoogleがWebView内アカウントログインをブロックするためパーソナライズ不可。位置ドリフト(動画のピクセルを動かす)は自前所有のWebViewでしか不可能。
 - **道2(採用)**: **本物のYouTubeアプリの上にシステムオーバーレイでフェード膜+矢印を描く**。パーソナライズされた実コンテンツが使える。ただし**位置ドリフトは不可能**(他アプリのピクセルは動かせない)、演出は**フェード(暗転)+矢印のみ**。ユーザー判断「どうせ最終形がフェード+矢印なら道1は無駄」。
 
-**道2の代償**: 実アプリの上に被せるため、Androidのタッチセキュリティ(後述§8)と正面衝突する。これが現在の未解決課題。
+**道2の制約**: 実アプリの上に被せるためAndroidのタッチセキュリティに従う必要がある。単一windowと安全なwindow alphaで通常操作を維持する(後述§5・§8)。
 
 ---
 
@@ -80,61 +80,51 @@
 - **検証(🟢🟢)**: ①前面がChrome/YouTubeでも裏でVIOポーズが更新継続。②動画視聴の自然な持ち方で歩いてもトラッキング維持。→ 道2は技術的に実現可能と確定。
 - **ハマり**: サービスのフィールド初期化で `Handler(mainLooper)` がNPE(Context未接続)→ `Looper.getMainLooper()` で修正。
 
-### Phase 2b: 実アプリ上への矢印オーバーレイ誘導 ✅
+### Phase 2b/2c+: 実アプリ上への安全な誘導・暗転
 - **概念**: 誘導パイプラインをサービスに載せ、YouTube等の上に矢印を描く。
-- サービスに誘導モード追加(`ACTION_START_GUIDANCE`): マーカーDB設定、route.json読込、毎フレームGuidanceEngine計算。`GuidanceOverlay`(画面上部中央・半透明黒・矢印長=画面幅の約1/5・`FLAG_NOT_TOUCHABLE`)。MainActivityに「離脱開始」ボタン(Phase1セッションを閉じてからサービス起動→`moveTaskToBack`)。
+- サービスに誘導モード追加(`ACTION_START_GUIDANCE`): マーカーDB設定、route.json読込、毎フレームGuidanceEngine計算。矢印と暗転膜は一枚の `GuidanceOverlay` に統合する。70%まではタッチ透過用window alpha 0.70、それ以降は100%暗転へ向けてwindow alphaも上げる。
 - **検証**: マーカーロック後、YouTube上で矢印が経路方向を指し続ける。
-- **修正**: 当初マーカーが視界から外れると矢印が消えた(state==TRACKINGを要求していた)→ **一度アンカー確立後(markerPose≠null)は継続誘導**に修正。矢印も半透明化(不透明度165/255)。
+- **追跡信頼度**: camera と Anchor の両方が TRACKING のフレームだけ方向を更新する。初回位置確立は8秒で打ち切るが、一度確立した後のPAUSEDは同じSession/Anchorで無期限に復帰を待ち、古い矢印を消す。STOPPEDだけを復帰不能として安全停止する。非nullの古い pose は誘導根拠にしない。
 
-### Phase 2c: フェード膜(スクリム)✅実装/⚠️課題あり
+### Phase 2c: 進行報酬とフェード
 - **概念**: 停滞で画面が暗くなり、進むと透明に戻る、コンセプトの核心の報酬ループ。
-- `FadeController`(純粋ロジック・テスト付き): 濃さ D∈[0,1]。進行中(経路弧長が0.03m超増加)/非誘導は D=0、停滞中は毎秒 1/30 加算で**30秒で真っ暗**。`ScrimOverlay`(全画面黒・alpha=D・`FLAG_NOT_TOUCHABLE`)。矢印は膜より前面。
-- **ユニットテスト・ビルドは成功**、実機インストール済み。
-- **⚠️ 実機で重大な課題が発覚(下記§4・§5)**。
+- `FadeController` はフレームごとの3cm判定やノイズデッドバンドではなく、平滑化した0.5秒の正味前進ウィンドウで進行を判定する。開始/停滞猶予、速度上限、暗転/回復レート上限を持ち、逆行・オフルートは報酬にせず、追跡喪失中は濃度を凍結する。
+- 到着は水平 endpoint 距離と cross-track の両方を満たした状態を1秒継続してラッチし、2.5秒後にカメラを解放する。
 
 ---
 
 ## 4. 現在地
 
-**Phase 2cを実装・デプロイしたが、実機テストでスクリムのタッチ遮断問題が発覚し、その修正方針を決めている段階。** コミットは `6e5ab98`(Phase 2c)まで、作業ツリーはクリーン。次にやるのは§5の修正。
+**Phase 2+を製品化方向へ再構築済み。** ホスト側ユニットテストとDebugビルドを通した段階であり、実機でのタッチ通過、マーカーロック遷移、追跡喪失、到着精度は未検証。詳細は `docs/phase2-architecture.md`。
 
 ---
 
-## 5. 今すぐ着手すべき課題: スクリムのタッチ遮断
+## 5. オーバーレイとタッチ通過の正しい前提
 
 ### 症状
 離脱開始してスクリムが出ると、**ほぼ透明(暗くなる前)でも画面全体のタップが効かなくなる**。ホーム画面のアプリアイコンも開けず、フィルター外のナビゲーションバーだけ操作可能。**通知の「表示切替」でオーバーレイをオフ(GONE)にするとタップが復活する。**
 
-### 確定した原因
-**表示状態(VISIBLE)のオーバーレイは、alpha 0(透明)でも下のアプリへのタッチをAndroidが遮断する**(タップジャッキング対策のセキュリティ)。判定は**不透明度ではなく「表示されているか」**。`ScrimOverlay` は `alpha=0` だが `visibility=VISIBLE` で全画面に追加されていたため、透明でも全画面を覆う扱いになり遮断していた。「表示切替」で `GONE` にすると覆いが消えて復活する、が動かぬ証拠。
-- 補足: 不透明度80%超では別途 Android 12「untrusted touch」も遮断する(`maximum_obscuring_opacity_for_touch` 既定0.8)。ただし今回の主因は**表示されている限り透明でも遮断される**方(opacity非依存)。
-- `FLAG_NOT_TOUCHABLE` は正しく付いているが、この遮断はそれとは別のOS層。
+Android 12 の untrusted-touch 判定は `View.alpha` ではなく `WindowManager.LayoutParams.alpha` を使う。`TYPE_APPLICATION_OVERLAY` が `FLAG_NOT_TOUCHABLE` で、同一UIDの重なりを式 `1-(1-a)(1-b)` で合成した不透明度が既定上限0.8以下なら、下のアプリへタッチを通せる。旧実装は `View.alpha` を変えていた一方、矢印と膜の各 window alpha が1.0だった。
 
-### 制約(避けられない)
-**「動画を薄暗くしつつ、その下のYouTubeも普通に触れる」はAndroidの仕様上できない。** 膜が見えている限り、下のタッチは死ぬ。
-
-### 決定した修正方針
-**膜を「暗くしている時だけ表示、それ以外は完全に消す(GONE/またはWindowManagerからremove)」にする。** タッチ遮断を"バグ"ではなく**メカニズムの一部**(止まると使えない→動くと戻る)に転化する:
-- 見ている/進んでいる/待機中/到着 → 膜は非表示 → YouTube完全操作可能(不具合解消)
-- 停滞して暗くなる時 → 膜表示・暗転 → タッチ効かない=「見るな、歩け」
-- 歩き出す → 膜が即消える → 操作可能
-
-実装ポイント:
-1. `ScrimOverlay`: density が閾値以下なら `visibility=GONE`(またはWindowManagerからdetach)、閾値超で `VISIBLE`+alpha=density。停滞開始直後にいきなりロックされないよう、表示開始に小さな猶予/閾値(例: density>0.1、約3秒)を設ける。
-2. `visibility` 切替はメインスレッドで(既存の `mainHandler` / view の `post` を利用)。
-3. ユーザーの「表示切替」手動トグル(`userHidden`)と競合しないように。
-
-### 未決定の設計判断(実装前にユーザーに確認)
-暗転中はYouTubeを触れない(歩いて解除)を許容するか、それとも**暗さを80%以下に抑えてYouTube操作を優先**するか(80%以下ならYouTube側は遮断しない可能性があるが真っ暗にはならない)。ユーザー未回答。**この点はユーザー確認後に実装すること。**
+修正後は矢印と膜を一枚のwindowに統合した。暗転70%まではwindow alphaを0.70に保ち内部黒Viewで調整する。70%以降はwindow alphaも1.0まで上げて完全な黒にする。Android 12以降では不透明度0.8超のオーバーレイ越しのタッチがブロックされるため、100%暗転との両立はできない。通知の「表示切替」「停止」は逃げ道として残す。Phase 2aのデバッグwindowは0.70のまま。
 
 ---
 
 ## 6. 残りのロードマップ
 
-- **Phase 2c仕上げ**: 上記§5のスクリム修正。効き方(30秒・暗転カーブ・猶予)は実機体感後に調整。
-- **Phase 2d**: 
-  - **自動発動**: `UsageStatsManager`(`PACKAGE_USAGE_STATS`権限)でYouTube連続視聴を検知し自動で離脱開始。これにより「アプリ→ホーム→YouTube起動」の導線(ランチャーのタッチ遮断に当たる)を回避でき、実アプリ上で自然に発動できる。
-  - **到着挙動の3モード切替**(ユーザーが最も気にしている点、A/B検証用): ①フェードで終了 ②解除して全開 ③置いて確認するまで保留(NFC等)。実装で固定せず切替パラメータにする。
+- **Phase 2実機仕上げ**: 70%以下でYouTube操作が継続し80%超で意図通り遮断されること、100%暗転、暗転/回復カーブ、経路終端の数十cm精度を端末で調整する。
+- **Phase 2d（実装済み、実機確認待ち）**:
+  - 常時監視して検知後にカメラを起動するUsageStats試作は撤回した。代わりに、可視Activityから開始済みのcamera FGS内でだけ、実際に起動したYouTubeアプリ/ブラウザの連続前面時間を測る。
+  - 「位置合わせして視聴開始」→Phase 1マーカー認識→camera FGSのARCore Session再開→YouTubeアプリ/既定ブラウザ起動、の順で視聴前にカメラサービスを準備する。サービス側のマーカー再確立はYouTube表示後も背後で継続する。
+  - 視聴先の未設定時はブラウザ版が既定。Intent開始成功後だけ起動予約を完了し、失敗時は1秒間隔で最大3回再試行する。既定ブラウザが失敗すれば別のインストール済みブラウザを順次試す。
+  - サービス側の初回マーカー再確立は8秒を上限とする。確立後のPAUSEDはマーカー再スキャンなしで自動復帰を待ち、STOPPEDだけを安全停止する。
+  - マーカー待機・権限設定中の開始要求はActivityの保存状態、サービス開始後の一度だけの視聴先起動予約はサービスが保持する。画面回転や一時的なバックグラウンド移行後も継続する。
+  - 連続視聴の介入閾値は1〜120分を1分単位、既定30分。別アプリ、画面消灯、画面ロック、データ欠損でリセットし、到達前のオーバーレイは透明・無表示にする。
+  - UsageStatsは視聴先起動後の専用スレッドで初回5分・以後差分だけを1秒間隔で読む。ARCore owner threadは観測済みスナップショットを1件1回だけ消費し、別アプリ往復・消灯・ロック・欠損の中断フラグを失わない。
+  - 対象ActivityのPAUSEDと後続RESUMEDが読取境界をまたぐ場合は連続時間を保持して時計だけ止める。旧サービスからの再開始は、STOPPINGでActivityをunbindし、onDestroy後の静的IDLEをmain-loopで確認してから発行する。STOPPING中は再bindしない。
+  - 停滞判定後から100%暗転までの時間は1〜60秒を1秒単位、既定30秒から選択する。
+  - 到着挙動は①フェード終了（2.5秒で暗転を滑らかに解除）②すぐ解除（650ms表示後に終了）の2モード。誘導開始のたびに選択し、サービス開始時に固定する。
+  - 変更履歴は `docs/patch-notes.md` にパッチノート形式で継続記録する。
   - **セッションログ**: 発動時刻・軌跡・到着時刻・到着後の再視聴までの時間 等をJSON保存し、仮説検証(ブロッカー方式との比較)に使う。
 - **将来**: マーカーレス化(出発点が毎回同じ利用特性を使った軌跡マッチング / Cloud Anchors)、複数目的地。
 
@@ -143,7 +133,7 @@
 ## 7. コード構成(ファイルマップ)
 
 `app/src/main/java/com/nacon01/kunekune/`
-- `MainActivity.kt` — Phase1前面AR画面の統括。ボタン: 記録開始/終了、誘導開始/終了(前面AR用)、2a裏で追跡テスト、離脱開始。権限フローもここ。
+- `MainActivity.kt` — Phase1前面AR画面の統括。ボタン: 記録開始/終了、誘導開始/終了(前面AR用)、位置合わせして視聴開始。利用状況を含む権限フロー、開始時の到着モード選択、YouTube起動もここ。
 - `ArTrackingManager.kt` — **前面**ARCoreセッション(Phase1)。`TrackingSnapshot`発行。
 - `CameraBackgroundRenderer.kt` — カメラGL背景(Phase1前面)。
 - `DebugHud.kt` — 前面のデバッグHUD。
@@ -154,11 +144,12 @@
 - `GuidanceArrowView.kt` — Canvas矢印。`compact=true`でオーバーレイ用縮小版。EMA平滑化・半透明。
 - `BackgroundTrackingService.kt` — **道2の中核**。カメラ型フォアグラウンドサービスでヘッドレスARCore。2a生トラッキングモード + 2b/2c誘導モード。オフスクリーンEGL(内部`HeadlessEgl`)。`ACTION_START_GUIDANCE` / `ACTION_STOP` / `ACTION_TOGGLE_OVERLAY`。
 - `TrackingOverlay.kt` — 2a用デバッグ最前面テキスト(コンパクト箱)。
-- `GuidanceOverlay.kt` — 2b用矢印オーバーレイ(上部中央・半透明黒・`FLAG_NOT_TOUCHABLE`)。
-- `ScrimOverlay.kt` — 2c用フェード膜(全画面黒・alpha=density・`FLAG_NOT_TOUCHABLE`)。**§5の修正対象**。
-- `FadeController.kt` — フェード濃さロジック(30秒で真っ暗・ARCore非依存・テスト有)。
+- `GuidanceOverlay.kt` — 矢印と内部暗転Viewを持つ単一window。70%まではwindow alpha 0.70、以降は1.0まで上げる・`FLAG_NOT_TOUCHABLE`。
+- `FadeController.kt` — 正味前進蓄積、猶予、ヒステリシス、追跡喪失凍結を持つ純粋ロジック。
+- `ContinuousViewingTracker.kt` / `UsageStatsForegroundReader.kt` — camera FGSセッション内だけで、起動した実パッケージの連続前面利用を判定する。
+- `TrackingRecoveryPolicy.kt` — 初回8秒、確立後PAUSEDの自動復帰、STOPPED安全停止を分離した純粋ポリシー。
 
-`app/src/test/java/.../` — `RouteRecorderTest`, `GuidanceEngineTest`, `FadeControllerTest`。
+`app/src/test/java/.../` — pure test classes: `RouteRecorderTest`, `GuidanceEngineTest`, `FadeControllerTest`, `GuidanceProgressSafetyTest`, `StoredRouteValidatorTest`, `TerminalFailureStatusTest`。
 `tools/GenerateMarker.java` — マーカー画像生成(乱数シード固定)。`tools/arcoreimg/`(gitignore) — 品質検証ツール。
 `docs/` — 各フェーズ解説、`marker/marker-print.html`。
 
@@ -167,9 +158,9 @@
 ## 8. 技術的に確定した重要事実・ハマりどころ
 
 1. **ヘッドレスARCore**: カメラ型フォアグラウンドサービス + オフスクリーンEGL(pbuffer+外部OESテクスチャを`setCameraTextureName`)で、他アプリ前面でもVIO継続可能(2aで実証)。`requestInstall`はサービスから呼べないので、ARCoreインストール済み前提で`Session(context)`直接生成。
-2. **Androidタッチセキュリティ(最重要・現行課題)**: 別アプリを覆う**表示状態のオーバーレイは透明でも下のタッチを遮断**する。`GONE`/detachで解消。opacity>0.8では別途untrusted touchでも遮断。→ 覆いは"暗くする時だけ"出す設計にする(§5)。
-3. **二重ARCoreセッション衝突**: 前面Phase1セッションとサービスセッションが同時だとカメラ衝突(真っ白)。離脱開始時にPhase1セッションを`close()`してからサービス起動する順序が必須。
-4. **マーカーアンカーの維持**: 一度認識すれば視界外でもVIOがAnchor維持。誘導継続の判定は `markerPoseInWorld != null`(state==TRACKING を要求してはいけない)。
+2. **Androidタッチセキュリティ**: `LayoutParams.alpha` と複数windowの合成不透明度が0.8以下なら、`FLAG_NOT_TOUCHABLE` overlay越しのタッチを許可できる。`View.alpha`だけでは条件を満たさない。
+3. **二重ARCoreセッション衝突**: Activityとサービスはバインドした状態通知で所有権を引き渡す。Phase 2がPREPARINGからSTOPPINGの間、Phase 1は作成・resumeしない。
+4. **マーカーアンカーの信頼度**: 非null poseだけでは不十分。cameraとAnchorの両方がTRACKINGのフレームだけ新しい方向を出す。
 5. **マーカー品質**: 変更時は `tools/arcoreimg/arcoreimg.exe eval-img --input_image_path=app/src/main/assets/marker.png` で85点以上を確認。
 6. **サービス初期化NPE**: フィールドで`context.mainLooper`を呼ぶとContext未接続でNPE。`Looper.getMainLooper()`を使う。
 7. **color反転など端末設定**: アプリはシステム色を反転できない。`accessibility_display_inversion_enabled`等の端末設定が原因のことがある。
@@ -180,8 +171,8 @@
 
 - 道2 = 実YouTubeアプリの上にオーバーレイ。演出は**フェード+矢印のみ**(位置ドリフト不可)。
 - パーソナライズされたShortsは実アプリでしか得られない(WebViewはログイン不可)。
-- フェードと操作性はトレードオフ(§5)。真っ暗にするなら暗転中はタッチ不可を受け入れる。
-- 到着挙動(消える/解除/保留)は2dで切替式にしてA/B検証。
+- 70%まではタッチ操作を優先してwindow alpha 0.70を維持し、以降は100%暗転を優先する。80%超ではOSにより下層タッチがブロックされる。通知の表示切替と停止を逃げ道として残す。
+- 到着挙動は2dで「フェード終了/すぐ解除」を誘導開始ごとに選ぶ。将来NFC等の保留モードを追加できるよう値はサービス開始時に固定する。
 - 対象端末: Pixel 3a(Android 12/API31)主。借用でPixel 5。屋外は安全上不可(このメカニズムの生息地は屋内のみ)。
 
 ---

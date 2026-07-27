@@ -3,14 +3,12 @@ package com.nacon01.kunekune
 import android.content.Context
 import android.graphics.Color
 import android.graphics.PixelFormat
-import android.os.Build
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.view.Gravity
 import android.view.View
 import android.view.WindowManager
 import android.widget.TextView
-import java.util.Locale
 
 data class TrackingOverlaySnapshot(
     val state: String,
@@ -44,7 +42,10 @@ class TrackingOverlay(context: Context) : TextView(context.applicationContext) {
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE,
             PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.START }
+        ).apply {
+            gravity = Gravity.TOP or Gravity.START
+            alpha = GuidanceOverlay.SAFE_WINDOW_ALPHA
+        }
         windowManager.addView(this, params)
         attached = true
     }
@@ -69,6 +70,12 @@ class TrackingOverlay(context: Context) : TextView(context.applicationContext) {
 
     fun remove() {
         if (!attached) return
-        try { windowManager.removeView(this) } finally { attached = false }
+        try {
+            windowManager.removeView(this)
+        } catch (_: Exception) {
+            // The system may already have removed the window after permission loss.
+        } finally {
+            attached = false
+        }
     }
 }

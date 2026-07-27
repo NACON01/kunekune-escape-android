@@ -23,7 +23,8 @@ data class MarkerTrackingSnapshot(
     val state: MarkerDetectionState,
     val cameraPoseInMarkerSpace: Pose?,
     val markerPoseInWorld: Pose?,
-    val distanceMeters: Float?
+    val distanceMeters: Float?,
+    val anchorTrackingState: TrackingState? = null
 )
 
 class MarkerAnchor(private val context: Context) {
@@ -63,22 +64,22 @@ class MarkerAnchor(private val context: Context) {
                     anchor = image.createAnchor(image.centerPose)
                     markerPose = anchor?.pose
                 }
-                state = MarkerDetectionState.TRACKING
-            } else if (anchor != null) {
-                state = MarkerDetectionState.LOST
             }
         }
 
-        anchor?.let { currentAnchor ->
-            if (currentAnchor.trackingState == TrackingState.TRACKING) {
-                markerPose = currentAnchor.pose
-            }
+        val anchorTracking = anchor?.trackingState == TrackingState.TRACKING
+        if (anchorTracking) {
+            markerPose = anchor?.pose
+            state = MarkerDetectionState.TRACKING
+        } else if (anchor != null) {
+            state = MarkerDetectionState.LOST
         }
-        if (anchor == null && markerUpdated && state != MarkerDetectionState.TRACKING) {
+        if (anchor == null && markerUpdated) {
             state = MarkerDetectionState.NOT_DETECTED
         }
 
-        val cameraPose = if (frame.camera.trackingState == TrackingState.TRACKING) {
+        val trustedMarkerPose = markerPose.takeIf { anchorTracking }
+        val cameraPose = if (frame.camera.trackingState == TrackingState.TRACKING && anchorTracking) {
             markerPose?.inverse()?.compose(frame.camera.pose)
         } else {
             null
@@ -88,13 +89,13 @@ class MarkerAnchor(private val context: Context) {
         val distance = translation?.let {
             sqrt(it[0] * it[0] + it[1] * it[1] + it[2] * it[2])
         }
-        return MarkerTrackingSnapshot(state, cameraPose, markerPose, distance)
+        return MarkerTrackingSnapshot(state, cameraPose, trustedMarkerPose, distance, anchor?.trackingState)
     }
 
     fun stoppedSnapshot(): MarkerTrackingSnapshot {
         if (anchor != null) state = MarkerDetectionState.LOST
         latestCameraPose = null
-        return MarkerTrackingSnapshot(state, null, null, null)
+        return MarkerTrackingSnapshot(state, null, null, null, anchor?.trackingState)
     }
 
     fun close() {

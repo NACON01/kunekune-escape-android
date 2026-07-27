@@ -95,9 +95,13 @@ class GuidanceArrowView(
         } else {
             DISTANCE_TEXT_SIZE
         }
-        val remaining = guidance.remainingDistanceMeters?.let {
-            String.format(Locale.US, "%.1f m", it)
-        } ?: "--.- m"
+        val remaining = if (guidance.trackingLost) {
+"--.- m"
+        } else {
+            guidance.remainingDistanceMeters?.let {
+                String.format(Locale.US, "%.1f m", it)
+            } ?: "--.- m"
+        }
         val distanceOffset = if (compact) {
             COMPACT_DISTANCE_OFFSET_DP * resources.displayMetrics.density
         } else {
