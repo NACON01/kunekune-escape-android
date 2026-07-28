@@ -94,7 +94,10 @@ class FadeController(
 
                         if (progressWindowElapsedSeconds >= PROGRESS_WINDOW_SECONDS) {
                             when {
-                                progressWindowNetMeters >= MINIMUM_PROGRESS_WINDOW_METERS -> {
+                                progressWindowNetMeters >= minOf(
+                                    MINIMUM_PROGRESS_WINDOW_METERS,
+                                    progressRewardMeters
+                                ) -> {
                                     pendingForwardMeters += progressWindowNetMeters
                                 }
                                 progressWindowNetMeters <= -SUBSTANTIAL_BACKWARD_WINDOW_METERS -> {
@@ -163,9 +166,15 @@ class FadeController(
     }
 
     companion object {
-        fun forFadeDurationSeconds(seconds: Int): FadeController {
+        fun forFadeDurationSeconds(
+            seconds: Int,
+            progressRewardMeters: Float = 0.08f
+        ): FadeController {
             require(seconds > 0)
-            return FadeController(fadeRatePerSecond = 1f / seconds.toFloat())
+            return FadeController(
+                fadeRatePerSecond = 1f / seconds.toFloat(),
+                progressRewardMeters = progressRewardMeters
+            )
         }
 
         private const val MAX_STEP_SECONDS = 0.25f

@@ -2,7 +2,6 @@
 
 import android.content.Context
 import android.graphics.Canvas
-import android.graphics.Color
 import android.graphics.Paint
 import android.graphics.Path
 import android.view.View
@@ -67,11 +66,7 @@ class GuidanceArrowView(
             height / 2f - arrowSize
         }
         // 背後のコンテンツを妨げないよう矢印自体も半透明にする。
-        val color = if (guidance.trackingLost) {
-            Color.argb(ARROW_ALPHA, 170, 170, 170)
-        } else {
-            Color.argb(ARROW_ALPHA, 40, 220, 255)
-        }
+        val color = GuidanceColorPolicy.markerColor(guidance.trackingLost)
         arrowPaint.color = color
 
         canvas.save()
@@ -110,7 +105,7 @@ class GuidanceArrowView(
         canvas.drawText(remaining, centerX, centerY + arrowSize + distanceOffset, textPaint)
 
         if (guidance.trackingLost) {
-            textPaint.color = Color.WHITE
+            textPaint.color = color
             textPaint.textSize = if (compact) {
                 COMPACT_LOST_TEXT_SP * resources.displayMetrics.scaledDensity
             } else {
@@ -130,7 +125,7 @@ class GuidanceArrowView(
     }
 
     private fun drawArrived(canvas: Canvas) {
-        textPaint.color = Color.WHITE
+        textPaint.color = GuidanceColorPolicy.markerColor(trackingLost = false)
         textPaint.textSize = ARRIVED_TEXT_SIZE
         canvas.drawText("到着!", width / 2f, height / 2f, textPaint)
     }
@@ -150,7 +145,6 @@ class GuidanceArrowView(
 
     companion object {
         private const val EMA_ALPHA = 0.18f
-        private const val ARROW_ALPHA = 165
         private const val ARROW_SIZE = 72f
         private const val DISTANCE_TEXT_SIZE = 28f
         private const val LOST_TEXT_SIZE = 22f

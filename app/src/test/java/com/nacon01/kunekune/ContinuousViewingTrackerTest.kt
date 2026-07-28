@@ -8,7 +8,7 @@ import org.junit.Test
 class ContinuousViewingTrackerTest {
     @Test
     fun armedInterventionHidesAwayAndRestoresImmediatelyOnReturn() {
-        val tracker = ContinuousViewingTracker(1)
+        val tracker = ContinuousViewingTracker(60)
         tracker.update(0L, "browser", "browser", true, false, true)
         val armed = tracker.update(
             60_000L * NANOS_PER_MILLISECOND,
@@ -50,7 +50,7 @@ class ContinuousViewingTrackerTest {
 
     @Test
     fun thresholdIsReachedAtTheConfiguredContinuousBoundary() {
-        val tracker = ContinuousViewingTracker(1)
+        val tracker = ContinuousViewingTracker(60)
         tracker.update(0L, "browser", "browser", true, false, true)
         val before = tracker.update(59_999L * NANOS_PER_MILLISECOND, "browser", "browser", true, false, true)
         assertFalse(before.interventionActive)
@@ -61,7 +61,7 @@ class ContinuousViewingTrackerTest {
 
     @Test
     fun otherPackageScreenLockAndMissingDataResetContinuousTime() {
-        val tracker = ContinuousViewingTracker(1)
+        val tracker = ContinuousViewingTracker(60)
         tracker.update(0L, "browser", "browser", true, false, true)
         tracker.update(30_000L * NANOS_PER_MILLISECOND, "browser", "browser", true, false, true)
         assertTrue(tracker.update(31_000L * NANOS_PER_MILLISECOND, "maps", "browser", true, false, true).reset)
@@ -73,7 +73,7 @@ class ContinuousViewingTrackerTest {
 
     @Test
     fun invalidObservationRequiresAValidBaselineBeforeCountingAgain() {
-        val tracker = ContinuousViewingTracker(1)
+        val tracker = ContinuousViewingTracker(60)
         tracker.update(0L, "browser", "browser", true, false, true)
         tracker.update(30_000L * NANOS_PER_MILLISECOND, "browser", "browser", true, false, true)
 
@@ -101,7 +101,7 @@ class ContinuousViewingTrackerTest {
 
     @Test
     fun suspendedBaselinePreservesElapsedAndExcludesAmbiguousGapFromThreshold() {
-        val tracker = ContinuousViewingTracker(1)
+        val tracker = ContinuousViewingTracker(60)
         tracker.update(0L, "browser", "browser", true, false, true)
         val beforePause = tracker.update(
             59_999L * NANOS_PER_MILLISECOND,
@@ -138,7 +138,7 @@ class ContinuousViewingTrackerTest {
 
     @Test
     fun backwardsClockInvalidatesBaselineAndInterventionRemainsLatched() {
-        val tracker = ContinuousViewingTracker(1)
+        val tracker = ContinuousViewingTracker(60)
         tracker.update(0L, "browser", "browser", true, false, true)
         val active = tracker.update(60_000L * NANOS_PER_MILLISECOND, "browser", "browser", true, false, true)
         assertTrue(active.interventionActive)
@@ -158,5 +158,32 @@ class ContinuousViewingTrackerTest {
         )
         assertEquals(0L, firstValidAfterRollback.elapsedMillis)
         assertTrue(firstValidAfterRollback.interventionActive)
+    }
+
+    @Test
+    fun tenSecondDebugThresholdUsesTheExactBoundary() {
+        val tracker = ContinuousViewingTracker(10)
+        tracker.update(0L, "browser", "browser", true, false, true)
+
+        val before = tracker.update(
+            9_999L * NANOS_PER_MILLISECOND,
+            "browser",
+            "browser",
+            true,
+            false,
+            true
+        )
+        assertFalse(before.interventionActive)
+
+        val atBoundary = tracker.update(
+            10_000L * NANOS_PER_MILLISECOND,
+            "browser",
+            "browser",
+            true,
+            false,
+            true
+        )
+        assertTrue(atBoundary.interventionActive)
+        assertEquals(10_000L, atBoundary.thresholdMillis)
     }
 }

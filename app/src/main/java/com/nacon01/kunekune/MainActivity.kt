@@ -15,10 +15,12 @@ import android.opengl.GLSurfaceView
 import android.os.Bundle
 import android.os.IBinder
 import android.util.Log
+import android.text.InputType
 import android.view.Gravity
 import android.view.ViewGroup
 import android.view.WindowManager
 import android.widget.Button
+import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
@@ -41,6 +43,7 @@ class MainActivity : Activity() {
     private lateinit var viewingThresholdMinusButton: Button
     private lateinit var viewingThresholdValueButton: Button
     private lateinit var viewingThresholdPlusButton: Button
+    private lateinit var progressRewardValueButton: Button
     private lateinit var arrivalFadeMinusButton: Button
     private lateinit var arrivalFadeValueButton: Button
     private lateinit var arrivalFadePlusButton: Button
@@ -58,6 +61,7 @@ class MainActivity : Activity() {
     private var awaitingCamera = false
     private var usageSettingsOpened = false
     private var overlaySettingsOpened = false
+    private var pendingPictureInPicturePackage: String? = null
     private var pendingArrivalBehavior: ArrivalBehavior? = null
     private var arrivalDialogShown = false
     private var activityResumed = false
@@ -130,6 +134,8 @@ class MainActivity : Activity() {
             ?.getBoolean(STATE_NOTIFICATION_PERMISSION_DENIED) ?: false
         usageSettingsOpened = savedInstanceState?.getBoolean(STATE_USAGE_SETTINGS_OPENED) ?: false
         overlaySettingsOpened = savedInstanceState?.getBoolean(STATE_OVERLAY_SETTINGS_OPENED) ?: false
+        pendingPictureInPicturePackage = savedInstanceState
+            ?.getString(STATE_PENDING_PICTURE_IN_PICTURE_PACKAGE)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
 
         trackingManager = ArTrackingManager(this).apply {
@@ -189,7 +195,7 @@ class MainActivity : Activity() {
         viewingThresholdMinusButton = Button(this).apply {
             text = "−"
             setOnClickListener {
-                InterventionPreferences.adjustViewingThresholdMinutes(this@MainActivity, -1)
+                InterventionPreferences.adjustViewingThreshold(this@MainActivity, -1)
                 updateInterventionSettingsControls()
             }
         }
@@ -197,9 +203,12 @@ class MainActivity : Activity() {
         viewingThresholdPlusButton = Button(this).apply {
             text = "+"
             setOnClickListener {
-                InterventionPreferences.adjustViewingThresholdMinutes(this@MainActivity, 1)
+                InterventionPreferences.adjustViewingThreshold(this@MainActivity, 1)
                 updateInterventionSettingsControls()
             }
+        }
+        progressRewardValueButton = Button(this).apply {
+            setOnClickListener { showProgressRewardDialog() }
         }
         arrivalFadeMinusButton = Button(this).apply {
             text = "−"
@@ -269,6 +278,17 @@ class MainActivity : Activity() {
             addView(viewingThresholdPlusButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(viewingTargetButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
+        val progressRewardRow = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            addView(
+                TextView(this@MainActivity).apply { text = "回復距離" },
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            )
+            addView(
+                progressRewardValueButton,
+                LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 3f)
+            )
+        }
         val arrivalFadeRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
             addView(TextView(this@MainActivity).apply { text = "到着後暗転" }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
@@ -298,6 +318,10 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
             addView(viewingThresholdRow, LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+            ))
+            addView(progressRewardRow, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
@@ -350,6 +374,10 @@ class MainActivity : Activity() {
         super.onResume()
         activityResumed = true
         viewingLaunchAttempts = 0
+        pendingPictureInPicturePackage?.let { packageName ->
+            InterventionPreferences.markPictureInPictureSetupGuidanceShown(this, packageName)
+            pendingPictureInPicturePackage = null
+        }
         if (BackgroundTrackingService.currentState == BackgroundTrackingState.STOPPING) {
             suspendPhase1ForService(closeSession = false)
             scheduleGuidanceStopCompletion()
@@ -378,6 +406,10 @@ class MainActivity : Activity() {
         outState.putBoolean(STATE_NOTIFICATION_PERMISSION_DENIED, notificationPermissionDenied)
         outState.putBoolean(STATE_USAGE_SETTINGS_OPENED, usageSettingsOpened)
         outState.putBoolean(STATE_OVERLAY_SETTINGS_OPENED, overlaySettingsOpened)
+        outState.putString(
+            STATE_PENDING_PICTURE_IN_PICTURE_PACKAGE,
+            pendingPictureInPicturePackage
+        )
         super.onSaveInstanceState(outState)
     }
 
@@ -464,6 +496,7 @@ class MainActivity : Activity() {
         }
         usageSettingsOpened = false
         overlaySettingsOpened = false
+        pendingPictureInPicturePackage = null
         viewingStartPending = true
         pendingArrivalBehavior = null
         departureButton.text = "マーカー待機中"
@@ -513,12 +546,17 @@ class MainActivity : Activity() {
         fadeValueButton.text = "${fadeSeconds}秒"
         fadeMinusButton.isEnabled = fadeSeconds > InterventionPreferences.FADE_MIN_SECONDS
         fadePlusButton.isEnabled = fadeSeconds < InterventionPreferences.FADE_MAX_SECONDS
-        val thresholdMinutes = InterventionPreferences.viewingThresholdMinutes(this)
-        viewingThresholdValueButton.text = "${thresholdMinutes}分"
+        val thresholdSeconds = InterventionPreferences.viewingThresholdSeconds(this)
+        viewingThresholdValueButton.text =
+            InterventionPreferences.formatViewingThreshold(thresholdSeconds)
         viewingThresholdMinusButton.isEnabled =
-            thresholdMinutes > InterventionPreferences.THRESHOLD_MIN_MINUTES
+            thresholdSeconds > InterventionPreferences.THRESHOLD_MIN_SECONDS
         viewingThresholdPlusButton.isEnabled =
-            thresholdMinutes < InterventionPreferences.THRESHOLD_MAX_MINUTES
+            thresholdSeconds < InterventionPreferences.THRESHOLD_MAX_SECONDS
+        val progressRewardCentimeters =
+            InterventionPreferences.progressRewardCentimeters(this)
+        progressRewardValueButton.text =
+            "${InterventionPreferences.formatProgressRewardCentimeters(progressRewardCentimeters)}cm"
         val arrivalFadeMinutes = InterventionPreferences.arrivalFadeMinutes(this)
         arrivalFadeValueButton.text = "${arrivalFadeMinutes}分"
         arrivalFadeMinusButton.isEnabled =
@@ -532,6 +570,37 @@ class MainActivity : Activity() {
         leaveDestinationFadePlusButton.isEnabled =
             leaveDestinationFadeMinutes < InterventionPreferences.LEAVE_DESTINATION_FADE_MAX_MINUTES
         viewingTargetButton.text = InterventionPreferences.viewingTarget(this).displayName
+    }
+
+    private fun showProgressRewardDialog() {
+        val current = InterventionPreferences.progressRewardCentimeters(this)
+        val input = EditText(this).apply {
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            setText(InterventionPreferences.formatProgressRewardCentimeters(current))
+            selectAll()
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("フェード回復に必要な移動距離")
+            .setMessage("0.5〜300cmで入力してください")
+            .setView(input)
+            .setPositiveButton("保存", null)
+            .setNegativeButton("キャンセル", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val value = input.text.toString().trim().toFloatOrNull()
+                if (value == null ||
+                    !InterventionPreferences.isValidProgressRewardCentimeters(value)
+                ) {
+                    input.error = "0.5〜300cmで入力してください"
+                } else {
+                    InterventionPreferences.setProgressRewardCentimeters(this, value)
+                    updateInterventionSettingsControls()
+                    dialog.dismiss()
+                }
+            }
+        }
+        dialog.show()
     }
 
     private fun continueBackgroundTrackingStart() {
@@ -551,6 +620,10 @@ class MainActivity : Activity() {
             return
         }
         usageSettingsOpened = false
+        val viewingPackage = preferredViewingPackage()
+        if (viewingPackage != null && !ensurePictureInPictureSetup(viewingPackage)) {
+            return
+        }
         if (BackgroundTrackingService.blocksPhase1Camera()) {
             bindTrackingService()
             return
@@ -804,8 +877,61 @@ class MainActivity : Activity() {
         pendingArrivalBehavior = null
         usageSettingsOpened = false
         overlaySettingsOpened = false
+        pendingPictureInPicturePackage = null
         arrivalDialogShown = false
         departureButton.text = "位置合わせして視聴開始"
+    }
+
+    private fun preferredViewingPackage(): String? {
+        val youtubeUri = Uri.parse(YOUTUBE_HOME_URL)
+        if (InterventionPreferences.viewingTarget(this) == ViewingTarget.YOUTUBE_APP) {
+            val youtubeIntent = Intent(Intent.ACTION_VIEW, youtubeUri).apply {
+                setPackage(YOUTUBE_PACKAGE)
+            }
+            if (packageManager.resolveActivity(
+                    youtubeIntent,
+                    PackageManager.MATCH_DEFAULT_ONLY
+                ) != null
+            ) {
+                return YOUTUBE_PACKAGE
+            }
+        }
+        return browserIntents(youtubeUri).firstOrNull()?.`package`
+    }
+
+    private fun ensurePictureInPictureSetup(targetPackage: String): Boolean {
+        if (!PictureInPicturePermission.shouldOpenInitialSetup(
+                targetPackage,
+                InterventionPreferences.isPictureInPictureSetupGuidanceShown(this, targetPackage)
+            )
+        ) {
+            return true
+        }
+        guidancePendingStart = true
+        pendingPictureInPicturePackage = targetPackage
+        guidanceHint.text = "初回のみです。PiPをオフにして戻ってください"
+        if (openPictureInPictureSettings(targetPackage)) return false
+
+        markPictureInPictureSetupGuidance(targetPackage)
+        return true
+    }
+
+    private fun openPictureInPictureSettings(targetPackage: String): Boolean {
+        val packageUri = Uri.parse("package:$targetPackage")
+        val directIntent = Intent(PICTURE_IN_PICTURE_SETTINGS_ACTION, packageUri)
+        return try {
+            startActivity(directIntent)
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun markPictureInPictureSetupGuidance(packageName: String) {
+        InterventionPreferences.markPictureInPictureSetupGuidanceShown(this, packageName)
+        if (pendingPictureInPicturePackage == packageName) {
+            pendingPictureInPicturePackage = null
+        }
     }
 
     private fun launchViewingTarget(selected: ViewingTarget): ViewingLaunchResult? {
@@ -836,12 +962,16 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun tryStartViewingIntent(intent: Intent): String? = try {
-        startActivity(intent)
-        intent.`package` ?: intent.component?.packageName
-    } catch (exception: Exception) {
-        Log.e(TAG, "viewing target launch failed", exception)
-        null
+    private fun tryStartViewingIntent(intent: Intent): String? {
+        val targetPackage = intent.`package` ?: intent.component?.packageName
+        if (targetPackage != null && !ensurePictureInPictureSetup(targetPackage)) return null
+        return try {
+            startActivity(intent)
+            targetPackage
+        } catch (exception: Exception) {
+            Log.e(TAG, "viewing target launch failed", exception)
+            null
+        }
     }
 
     private fun tryStartBrowser(uri: Uri): String? =
@@ -967,6 +1097,8 @@ class MainActivity : Activity() {
         private const val SERVICE_STOP_POLL_INTERVAL_MILLIS = 50L
         private const val YOUTUBE_PACKAGE = "com.google.android.youtube"
         private const val YOUTUBE_HOME_URL = "https://www.youtube.com/"
+        private const val PICTURE_IN_PICTURE_SETTINGS_ACTION =
+            "android.settings.PICTURE_IN_PICTURE_SETTINGS"
         private const val TAG = "KunekuneMain"
         private const val STATE_GUIDANCE_PENDING_START = "guidance_pending_start"
         private const val STATE_VIEWING_START_PENDING = "viewing_start_pending"
@@ -974,6 +1106,8 @@ class MainActivity : Activity() {
         private const val STATE_NOTIFICATION_PERMISSION_DENIED = "notification_permission_denied"
         private const val STATE_USAGE_SETTINGS_OPENED = "usage_settings_opened"
         private const val STATE_OVERLAY_SETTINGS_OPENED = "overlay_settings_opened"
+        private const val STATE_PENDING_PICTURE_IN_PICTURE_PACKAGE =
+            "pending_picture_in_picture_package"
     }
 }
 

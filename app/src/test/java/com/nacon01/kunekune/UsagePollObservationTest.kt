@@ -88,4 +88,12 @@ class UsagePollObservationTest {
                 .result.reconciliationPending
         )
     }
+
+    @Test
+    fun launchedGuidanceIsHiddenWheneverTheViewingTargetIsAway() {
+        assertTrue(shouldHideGuidanceForViewing(true, true, false))
+        assertFalse(shouldHideGuidanceForViewing(true, true, true))
+        assertFalse(shouldHideGuidanceForViewing(true, false, false))
+        assertFalse(shouldHideGuidanceForViewing(false, true, false))
+    }
 }

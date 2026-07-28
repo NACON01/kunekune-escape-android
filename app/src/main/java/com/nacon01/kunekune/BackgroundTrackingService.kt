@@ -86,6 +86,12 @@ internal fun mergeUsagePollObservation(
     )
 }
 
+internal fun shouldHideGuidanceForViewing(
+    guidanceMode: Boolean,
+    viewingTargetLaunched: Boolean,
+    viewingCurrentlyVisible: Boolean
+): Boolean = guidanceMode && viewingTargetLaunched && !viewingCurrentlyVisible
+
 class BackgroundTrackingService : Service() {
     inner class LocalBinder : Binder() {
         fun service(): BackgroundTrackingService = this@BackgroundTrackingService
@@ -194,7 +200,9 @@ class BackgroundTrackingService : Service() {
         cancellation.set(false)
         finishRequested.set(false)
         fadeController = FadeController.forFadeDurationSeconds(
-            InterventionPreferences.fadeToBlackSeconds(this)
+            seconds = InterventionPreferences.fadeToBlackSeconds(this),
+            progressRewardMeters =
+                InterventionPreferences.progressRewardCentimeters(this) / 100f
         )
         arrivalLatch.reset()
         arrivalBehavior = intent?.getStringExtra(EXTRA_ARRIVAL_BEHAVIOR)
@@ -206,7 +214,7 @@ class BackgroundTrackingService : Service() {
             leaveDestinationFadeMinutes = InterventionPreferences.leaveDestinationFadeMinutes(this)
         )
         viewingUsageTracker = if (guidanceMode) {
-            ContinuousViewingTracker(InterventionPreferences.viewingThresholdMinutes(this))
+            ContinuousViewingTracker(InterventionPreferences.viewingThresholdSeconds(this))
         } else null
         transitionTo(BackgroundTrackingState.PREPARING)
 
@@ -891,8 +899,18 @@ class BackgroundTrackingService : Service() {
     }
 
     private fun enqueueGuidance(snapshot: GuidanceOverlaySnapshot) {
+        val visibleSnapshot = if (shouldHideGuidanceForViewing(
+                guidanceMode = guidanceMode,
+                viewingTargetLaunched = launchedViewingPackage != null,
+                viewingCurrentlyVisible = viewingCurrentlyVisible
+            )
+        ) {
+            GuidanceOverlaySnapshot(GuidanceOverlayState.WAITING_FOR_VIEWING)
+        } else {
+            snapshot
+        }
         synchronized(uiLock) {
-            pendingGuidance = snapshot
+            pendingGuidance = visibleSnapshot
             scheduleUiLocked()
         }
     }

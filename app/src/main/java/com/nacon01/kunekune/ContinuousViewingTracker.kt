@@ -18,8 +18,8 @@ data class ViewingGateState(
 )
 
 /** Counts only uninterrupted, interactive foreground use of one exact package. */
-class ContinuousViewingTracker(thresholdMinutes: Int) {
-    private val thresholdMillis = thresholdMinutes.coerceIn(1, 120) * 60_000L
+class ContinuousViewingTracker(thresholdSeconds: Int) {
+    private val thresholdMillis = thresholdSeconds.coerceIn(10, 120 * 60) * 1_000L
     private var elapsedMillis = 0L
     private var previousObservationNanos: Long? = null
     private var interventionActive = false

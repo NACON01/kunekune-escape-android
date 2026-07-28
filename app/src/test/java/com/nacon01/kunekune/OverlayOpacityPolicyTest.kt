@@ -9,6 +9,7 @@ class OverlayOpacityPolicyTest {
         val opacity = OverlayOpacityPolicy.forDesiredDensity(1f)
         assertEquals(1f, opacity.windowAlpha, 0.0001f)
         assertEquals(1f, opacity.scrimAlpha, 0.0001f)
+        assertEquals(true, opacity.fullyOpaque)
     }
 
     @Test
@@ -16,6 +17,7 @@ class OverlayOpacityPolicyTest {
         val opacity = OverlayOpacityPolicy.forDesiredDensity(0.35f)
         assertEquals(0.70f, opacity.windowAlpha, 0.0001f)
         assertEquals(0.50f, opacity.scrimAlpha, 0.0001f)
+        assertEquals(false, opacity.fullyOpaque)
     }
 
     @Test
@@ -31,5 +33,21 @@ class OverlayOpacityPolicyTest {
         val abovePlatformTouchLimit = OverlayOpacityPolicy.forDesiredDensity(0.81f)
         assertEquals(0.81f, abovePlatformTouchLimit.windowAlpha, 0.0001f)
         assertEquals(1f, abovePlatformTouchLimit.scrimAlpha, 0.0001f)
+        assertEquals(false, abovePlatformTouchLimit.fullyOpaque)
+    }
+
+    @Test
+    fun snapsTerminalDensityToOpaqueAndLeavesItWhenRecoveryStarts() {
+        val terminal = OverlayOpacityPolicy.forDesiredDensity(
+            OverlayOpacityPolicy.FULLY_OPAQUE_DENSITY_THRESHOLD
+        )
+        assertEquals(1f, terminal.windowAlpha, 0.0001f)
+        assertEquals(1f, terminal.scrimAlpha, 0.0001f)
+        assertEquals(true, terminal.fullyOpaque)
+
+        val recovering = OverlayOpacityPolicy.forDesiredDensity(0.998f)
+        assertEquals(0.998f, recovering.windowAlpha, 0.0001f)
+        assertEquals(1f, recovering.scrimAlpha, 0.0001f)
+        assertEquals(false, recovering.fullyOpaque)
     }
 }

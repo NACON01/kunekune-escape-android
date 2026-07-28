@@ -119,10 +119,11 @@ Android 12 の untrusted-touch 判定は `View.alpha` ではなく `WindowManage
   - 視聴先の未設定時はブラウザ版が既定。Intent開始成功後だけ起動予約を完了し、失敗時は1秒間隔で最大3回再試行する。既定ブラウザが失敗すれば別のインストール済みブラウザを順次試す。
   - サービス側の初回マーカー再確立は8秒を上限とする。確立後のPAUSEDはマーカー再スキャンなしで自動復帰を待ち、STOPPEDだけを安全停止する。
   - マーカー待機・権限設定中の開始要求はActivityの保存状態、サービス開始後の一度だけの視聴先起動予約はサービスが保持する。画面回転や一時的なバックグラウンド移行後も継続する。
-  - 連続視聴の介入閾値は1〜120分を1分単位、既定30分。別アプリ、画面消灯、画面ロック、データ欠損でリセットし、到達前のオーバーレイは透明・無表示にする。
+  - 連続視聴の介入閾値は10〜60秒を10秒単位、1分超は120分まで1分単位、既定30分。旧分単位設定は同じ時間を維持して秒単位へ移行する。別アプリ、画面消灯、画面ロック、データ欠損でリセットし、到達前のオーバーレイは透明・無表示にする。
   - UsageStatsは視聴先起動後の専用スレッドで初回5分・以後差分だけを1秒間隔で読む。ARCore owner threadは観測済みスナップショットを1件1回だけ消費し、別アプリ往復・消灯・ロック・欠損の中断フラグを失わない。
   - 対象ActivityのPAUSEDと後続RESUMEDが読取境界をまたぐ場合は連続時間を保持して時計だけ止める。旧サービスからの再開始は、STOPPINGでActivityをunbindし、onDestroy後の静的IDLEをmain-loopで確認してから発行する。STOPPING中は再bindしない。
   - 停滞判定後から100%暗転までの時間は1〜60秒を1秒単位、既定30秒から選択する。
+  - フェード回復を発動する経路上の前進距離は0.5〜300cmを直接入力し、既定8cm。誘導サービス開始時に固定する。
   - 到着挙動は①フェード終了（2.5秒で暗転を滑らかに解除）②すぐ解除（650ms表示後に終了）の2モード。誘導開始のたびに選択し、サービス開始時に固定する。
   - 変更履歴は `docs/patch-notes.md` にパッチノート形式で継続記録する。
   - **セッションログ**: 発動時刻・軌跡・到着時刻・到着後の再視聴までの時間 等をJSON保存し、仮説検証(ブロッカー方式との比較)に使う。
@@ -144,7 +145,7 @@ Android 12 の untrusted-touch 判定は `View.alpha` ではなく `WindowManage
 - `GuidanceArrowView.kt` — Canvas矢印。`compact=true`でオーバーレイ用縮小版。EMA平滑化・半透明。
 - `BackgroundTrackingService.kt` — **道2の中核**。カメラ型フォアグラウンドサービスでヘッドレスARCore。2a生トラッキングモード + 2b/2c誘導モード。オフスクリーンEGL(内部`HeadlessEgl`)。`ACTION_START_GUIDANCE` / `ACTION_STOP` / `ACTION_TOGGLE_OVERLAY`。
 - `TrackingOverlay.kt` — 2a用デバッグ最前面テキスト(コンパクト箱)。
-- `GuidanceOverlay.kt` — 矢印と内部暗転Viewを持つ単一window。70%まではwindow alpha 0.70、以降は1.0まで上げる・`FLAG_NOT_TOUCHABLE`。
+- `GuidanceOverlay.kt` — 矢印と内部暗転Viewを持つ誘導window。70%まではwindow alpha 0.70、以降は1.0まで上げる。99.9%以上では専用の方向HUDを子として持つopaqueな完全黒windowを最前面へ追加する。Home・別アプリでは従来どおり完全非表示にし、PiPは解決済み実パッケージごとに初回だけ設定案内する。
 - `FadeController.kt` — 正味前進蓄積、猶予、ヒステリシス、追跡喪失凍結を持つ純粋ロジック。
 - `ContinuousViewingTracker.kt` / `UsageStatsForegroundReader.kt` — camera FGSセッション内だけで、起動した実パッケージの連続前面利用を判定する。
 - `TrackingRecoveryPolicy.kt` — 初回8秒、確立後PAUSEDの自動復帰、STOPPED安全停止を分離した純粋ポリシー。

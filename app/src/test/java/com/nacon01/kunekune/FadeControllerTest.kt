@@ -141,6 +141,33 @@ class FadeControllerTest {
         }
     }
 
+    @Test
+    fun configuredProgressRewardChangesTheRequiredForwardDistance() {
+        val halfCentimeter = FadeController.forFadeDurationSeconds(
+            seconds = 30,
+            progressRewardMeters = 0.005f
+        )
+        val threeMeters = FadeController.forFadeDurationSeconds(
+            seconds = 30,
+            progressRewardMeters = 3f
+        )
+        repeatSeconds(30, 15f) { dt ->
+            halfCentimeter.update(true, true, true, 0f, dt)
+            threeMeters.update(true, true, true, 0f, dt)
+        }
+        val halfCentimeterDark = halfCentimeter.currentDensity()
+        val threeMetersDark = threeMeters.currentDensity()
+        var arc = 0f
+        repeatSeconds(30, 2f) { dt ->
+            arc += 0.05f * dt
+            halfCentimeter.update(true, true, true, arc, dt)
+            threeMeters.update(true, true, true, arc, dt)
+        }
+
+        assertTrue(halfCentimeter.currentDensity() < halfCentimeterDark)
+        assertTrue(threeMeters.currentDensity() >= threeMetersDark)
+    }
+
     private fun repeatSeconds(hz: Int, seconds: Float, block: (Float) -> Unit) {
         val dt = 1f / hz
         repeat((seconds * hz).toInt()) { block(dt) }
