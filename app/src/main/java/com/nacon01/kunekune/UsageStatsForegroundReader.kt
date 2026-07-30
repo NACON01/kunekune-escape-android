@@ -27,7 +27,10 @@ class UsageStatsForegroundReader(private val context: Context) {
         }
         val window = queryWindow.next(nowMillis)
         if (window == null) {
-            val observation = reducer.consumeObservation()
+            val observation = reconcilePendingObservation(
+                reducer.consumeObservation(),
+                nowMillis.coerceAtLeast(0L)
+            )
             return ForegroundPackageResult(
                 observation.packageName,
                 accessGranted = true,
@@ -54,7 +57,10 @@ class UsageStatsForegroundReader(private val context: Context) {
                 event.toForegroundUsageEvent()?.let(reducer::apply)
             }
             queryWindow.commit(window.endMillis)
-            val observation = reducer.consumeObservation()
+            val observation = reconcilePendingObservation(
+                reducer.consumeObservation(),
+                window.endMillis
+            )
             ForegroundPackageResult(
                 observation.packageName,
                 accessGranted = true,
@@ -71,6 +77,31 @@ class UsageStatsForegroundReader(private val context: Context) {
         } catch (_: RuntimeException) {
             resetState()
             ForegroundPackageResult(null, accessGranted = true, hasUsableData = false)
+        }
+    }
+
+    private fun reconcilePendingObservation(
+        observation: ForegroundUsageObservation,
+        endMillis: Long
+    ): ForegroundUsageObservation {
+        if (!observation.reconciliationPending) return observation
+        return try {
+            val recentEvents = usageStats?.queryEvents(
+                (endMillis - INITIAL_LOOKBACK_MILLIS).coerceAtLeast(0L),
+                endMillis
+            ) ?: return observation
+            val recentLifecycleEvents = mutableListOf<ForegroundUsageEvent>()
+            val recentEvent = UsageEvents.Event()
+            while (recentEvents.hasNextEvent()) {
+                recentEvents.getNextEvent(recentEvent)
+                recentEvent.toForegroundUsageEvent()?.let(recentLifecycleEvents::add)
+            }
+            reducer.reconcileRecentLifecycle(recentLifecycleEvents)
+            observation.mergeReconciledObservation(reducer.consumeObservation())
+        } catch (_: SecurityException) {
+            observation
+        } catch (_: RuntimeException) {
+            observation
         }
     }
 
@@ -98,7 +129,7 @@ class UsageStatsForegroundReader(private val context: Context) {
             )
             else -> null
         }
-        return ForegroundUsageEvent(type, activity)
+        return ForegroundUsageEvent(type, activity, timeStamp)
     }
 
     companion object {

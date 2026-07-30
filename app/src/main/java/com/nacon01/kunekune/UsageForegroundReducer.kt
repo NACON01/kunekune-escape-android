@@ -15,7 +15,8 @@ data class ForegroundActivityIdentity(
 
 data class ForegroundUsageEvent(
     val type: ForegroundUsageEventType,
-    val activity: ForegroundActivityIdentity? = null
+    val activity: ForegroundActivityIdentity? = null,
+    val timestampMillis: Long = 0L
 )
 
 data class ForegroundUsageObservation(
@@ -23,6 +24,18 @@ data class ForegroundUsageObservation(
     val differentPackageSincePreviousObservation: Boolean,
     val screenNonInteractiveSincePreviousObservation: Boolean,
     val reconciliationPending: Boolean
+)
+
+/** Keeps one-shot interruptions observed before a successful reconciliation consume. */
+fun ForegroundUsageObservation.mergeReconciledObservation(
+    reconciled: ForegroundUsageObservation
+): ForegroundUsageObservation = reconciled.copy(
+    differentPackageSincePreviousObservation =
+        differentPackageSincePreviousObservation ||
+            reconciled.differentPackageSincePreviousObservation,
+    screenNonInteractiveSincePreviousObservation =
+        screenNonInteractiveSincePreviousObservation ||
+            reconciled.screenNonInteractiveSincePreviousObservation
 )
 
 /** Pure UsageEvents state reducer; it has no Android dependencies and is safe to unit test. */
@@ -76,7 +89,95 @@ class UsageForegroundReducer {
         reconciliationPending = false
     }
 
+    /**
+     * Applies the authoritative result of a bounded recent lifecycle rescan. A resume is
+     * authoritative; pause, stop, and an incomplete history are deliberately not treated as
+     * proof that the target is foreground.
+     */
+    fun reconcile(recentState: RecentForegroundLifecycleState) {
+        if (recentState.status != ForegroundLifecycleStatus.RESUMED) {
+            reconciliationPending = true
+            return
+        }
+        val activity = recentState.activity ?: run {
+            reconciliationPending = true
+            return
+        }
+        val currentPackage = currentForeground?.packageName
+        if (currentPackage != null && currentPackage != activity.packageName) {
+            differentPackageSinceObservation = true
+        }
+        currentForeground = activity
+        reconciliationPending = false
+    }
+
     private var reconciliationPending = false
+}
+
+enum class ForegroundLifecycleStatus {
+    NONE,
+    RESUMED,
+    PAUSED,
+    STOPPED,
+    AMBIGUOUS
+}
+
+data class RecentForegroundLifecycleState(
+    val status: ForegroundLifecycleStatus,
+    val activity: ForegroundActivityIdentity? = null
+)
+
+/** Pure, Android-free reducer for a bounded chronological lifecycle rescan. */
+class RecentForegroundLifecycleReducer {
+    private var currentForeground: ForegroundActivityIdentity? = null
+    private var status = ForegroundLifecycleStatus.NONE
+
+    fun apply(event: ForegroundUsageEvent) {
+        when (event.type) {
+            ForegroundUsageEventType.ACTIVITY_RESUMED -> {
+                val activity = event.activity ?: run {
+                    status = ForegroundLifecycleStatus.AMBIGUOUS
+                    return
+                }
+                currentForeground = activity
+                status = ForegroundLifecycleStatus.RESUMED
+            }
+
+            ForegroundUsageEventType.ACTIVITY_PAUSED -> {
+                val activity = event.activity
+                if (activity == null) {
+                    status = ForegroundLifecycleStatus.AMBIGUOUS
+                } else if (activity == currentForeground) {
+                    status = ForegroundLifecycleStatus.PAUSED
+                }
+            }
+
+            ForegroundUsageEventType.ACTIVITY_STOPPED -> {
+                val activity = event.activity
+                if (activity == null) {
+                    status = ForegroundLifecycleStatus.AMBIGUOUS
+                } else if (activity == currentForeground) {
+                    status = ForegroundLifecycleStatus.STOPPED
+                }
+            }
+
+            ForegroundUsageEventType.SCREEN_NON_INTERACTIVE,
+            ForegroundUsageEventType.KEYGUARD_SHOWN -> Unit
+        }
+    }
+
+    fun snapshot(): RecentForegroundLifecycleState = RecentForegroundLifecycleState(
+        status = status,
+        activity = currentForeground
+    )
+}
+
+fun UsageForegroundReducer.reconcileRecentLifecycle(
+    events: Iterable<ForegroundUsageEvent>
+) {
+    val recentReducer = RecentForegroundLifecycleReducer()
+    events.sortedBy { it.timestampMillis }.forEach(recentReducer::apply)
+    reconcile(recentReducer.snapshot())
 }
 
 data class UsageQueryWindow(
