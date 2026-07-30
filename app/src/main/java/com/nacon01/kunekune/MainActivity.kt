@@ -471,7 +471,7 @@ class MainActivity : Activity() {
         settingsScreenView = settingsScreen
 
         screenContainer = FrameLayout(this).apply {
-            setBackgroundColor(Color.BLACK)
+            setBackgroundColor(Color.WHITE)
             addView(settingsScreen, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
             ))
