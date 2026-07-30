@@ -1,6 +1,7 @@
 package com.nacon01.kunekune
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -49,6 +50,48 @@ class ArrivalBehaviorTest {
         assertEquals(0.5f, halfway.density, 0.0001f)
 
         val returned = controller.update(0f, targetForeground = true, atDestination = true)
+        assertEquals(ArrivalPhase.AT_DESTINATION, returned.phase)
+        assertEquals(0f, returned.density, 0.0001f)
+    }
+
+    @Test
+    fun departurePolicyUsesStrictOneMeterBoundaryAndRejectsNonFiniteValues() {
+        assertTrue(isAtDestinationForDeparture(0.999f))
+        assertFalse(isAtDestinationForDeparture(1.000f))
+        assertFalse(isAtDestinationForDeparture(1.001f))
+        assertFalse(isAtDestinationForDeparture(Float.NaN))
+        assertFalse(isAtDestinationForDeparture(Float.POSITIVE_INFINITY))
+        assertFalse(isAtDestinationForDeparture(Float.NEGATIVE_INFINITY))
+    }
+
+    @Test
+    fun releaseBoundaryFadePausesAwayFromForegroundAndReturnsBelowOneMeter() {
+        val controller = ArrivalController(ArrivalBehavior.RELEASE, 30, 1)
+        controller.onArrival(0.8f)
+
+        val away = controller.update(
+            elapsedSeconds = 0f,
+            targetForeground = true,
+            atDestination = isAtDestinationForDeparture(1.000f)
+        )
+        assertEquals(ArrivalPhase.AWAY_FROM_DESTINATION_FADE, away.phase)
+
+        val paused = controller.update(30f, targetForeground = false, atDestination = false)
+        assertEquals(0f, paused.density, 0.0001f)
+        assertTrue(paused.timedFadePaused)
+        assertEquals(0L, paused.elapsedMillis)
+
+        val halfway = controller.update(30f, targetForeground = true, atDestination = false)
+        assertEquals(0.5f, halfway.density, 0.0001f)
+        val concealed = controller.update(30f, targetForeground = true, atDestination = false)
+        assertEquals(ArrivalPhase.FULL_CONCEALMENT, concealed.phase)
+        assertEquals(1f, concealed.density, 0.0001f)
+
+        val returned = controller.update(
+            elapsedSeconds = 0f,
+            targetForeground = true,
+            atDestination = isAtDestinationForDeparture(0.999f)
+        )
         assertEquals(ArrivalPhase.AT_DESTINATION, returned.phase)
         assertEquals(0f, returned.density, 0.0001f)
     }

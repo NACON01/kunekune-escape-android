@@ -92,6 +92,20 @@ internal fun shouldHideGuidanceForViewing(
     viewingCurrentlyVisible: Boolean
 ): Boolean = guidanceMode && viewingTargetLaunched && !viewingCurrentlyVisible
 
+internal fun canShowViewingTargetWithoutFreshObservation(
+    viewingInterventionArmed: Boolean,
+    latestUsageObservation: ForegroundPackageResult?,
+    latestUsageDataAvailable: Boolean,
+    expectedPackage: String,
+    screenInteractive: Boolean,
+    keyguardLocked: Boolean
+): Boolean = viewingInterventionArmed &&
+    latestUsageDataAvailable &&
+    latestUsageObservation?.reconciliationPending != true &&
+    latestUsageObservation?.packageName == expectedPackage &&
+    screenInteractive &&
+    !keyguardLocked
+
 class BackgroundTrackingService : Service() {
     inner class LocalBinder : Binder() {
         fun service(): BackgroundTrackingService = this@BackgroundTrackingService
@@ -580,10 +594,7 @@ class BackgroundTrackingService : Service() {
                     previousProjectedDistance = result.projectedDistanceMeters
                     val onRoute = result.crossTrackDistanceMeters <= GuidanceEngine.DEFAULT_PROGRESS_CORRIDOR_METERS
                     if (arrivalController.isArrived()) {
-                        val atDestination = result.endpointDistanceMeters <=
-                            GuidanceEngine.ARRIVAL_EXIT_THRESHOLD_METERS &&
-                            result.crossTrackDistanceMeters <=
-                            GuidanceEngine.ARRIVAL_EXIT_CORRIDOR_METERS
+                        val atDestination = isAtDestinationForDeparture(result.endpointDistanceMeters)
                         val arrivalState = arrivalController.update(
                             elapsedSeconds = dtSeconds,
                             targetForeground = viewingGate.currentlyVisible,
@@ -717,11 +728,14 @@ class BackgroundTrackingService : Service() {
         if (freshObservation == null) {
             val power = getSystemService(PowerManager::class.java)
             val keyguard = getSystemService(android.app.KeyguardManager::class.java)
-            val visible = viewingInterventionArmed &&
-                latestUsageDataAvailable &&
-                latestUsageObservation?.packageName == expectedPackage &&
-                power?.isInteractive == true &&
-                keyguard?.isKeyguardLocked != true
+            val visible = canShowViewingTargetWithoutFreshObservation(
+                viewingInterventionArmed = viewingInterventionArmed,
+                latestUsageObservation = latestUsageObservation,
+                latestUsageDataAvailable = latestUsageDataAvailable,
+                expectedPackage = expectedPackage,
+                screenInteractive = power?.isInteractive == true,
+                keyguardLocked = keyguard?.isKeyguardLocked == true
+            )
             viewingCurrentlyVisible = visible
             return ViewingGateState(viewingInterventionArmed, visible)
         }

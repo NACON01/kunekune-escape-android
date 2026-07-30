@@ -176,8 +176,25 @@ fun UsageForegroundReducer.reconcileRecentLifecycle(
     events: Iterable<ForegroundUsageEvent>
 ) {
     val recentReducer = RecentForegroundLifecycleReducer()
-    events.sortedBy { it.timestampMillis }.forEach(recentReducer::apply)
+    val orderedEvents = events.withIndex()
+        .filter { it.value.type.isActivityLifecycleEvent() }
+        .sortedWith(
+            compareBy<IndexedValue<ForegroundUsageEvent>>(
+                { it.value.timestampMillis },
+                { it.index }
+            )
+        )
+    if (orderedEvents.isEmpty()) return
+    orderedEvents.forEach { recentReducer.apply(it.value) }
     reconcile(recentReducer.snapshot())
+}
+
+private fun ForegroundUsageEventType.isActivityLifecycleEvent(): Boolean = when (this) {
+    ForegroundUsageEventType.ACTIVITY_RESUMED,
+    ForegroundUsageEventType.ACTIVITY_PAUSED,
+    ForegroundUsageEventType.ACTIVITY_STOPPED -> true
+    ForegroundUsageEventType.SCREEN_NON_INTERACTIVE,
+    ForegroundUsageEventType.KEYGUARD_SHOWN -> false
 }
 
 data class UsageQueryWindow(

@@ -13,6 +13,10 @@ enum class ArrivalPhase {
     FULL_CONCEALMENT
 }
 
+/** A RELEASE fade considers finite horizontal endpoint distances below one meter to be at the destination. */
+internal fun isAtDestinationForDeparture(endpointDistanceMeters: Float): Boolean =
+    endpointDistanceMeters.isFinite() && endpointDistanceMeters < 1.0f
+
 data class ArrivalControllerState(
     val phase: ArrivalPhase,
     val density: Float,

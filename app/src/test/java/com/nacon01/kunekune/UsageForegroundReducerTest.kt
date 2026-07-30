@@ -352,6 +352,41 @@ class UsageForegroundReducerTest {
     }
 
     @Test
+    fun emptyRecentLifecycleHistoryPreservesStableObservation() {
+        val reducer = UsageForegroundReducer()
+        reducer.apply(resumed("target", "TargetActivity"))
+
+        val original = reducer.consumeObservation()
+        reducer.reconcileRecentLifecycle(emptyList())
+        val repeated = reducer.consumeObservation()
+
+        assertEquals(original, repeated)
+    }
+
+    @Test
+    fun equalTimestampsPreserveUsageEventsEnumerationOrder() {
+        val targetThenOther = UsageForegroundReducer().also { reducer ->
+            reducer.reconcileRecentLifecycle(
+                listOf(
+                    resumed("target", "TargetActivity", 100L),
+                    resumed("other", "OtherActivity", 100L)
+                )
+            )
+        }.consumeObservation()
+        val otherThenTarget = UsageForegroundReducer().also { reducer ->
+            reducer.reconcileRecentLifecycle(
+                listOf(
+                    resumed("other", "OtherActivity", 100L),
+                    resumed("target", "TargetActivity", 100L)
+                )
+            )
+        }.consumeObservation()
+
+        assertEquals("other", targetThenOther.packageName)
+        assertEquals("target", otherThenTarget.packageName)
+    }
+
+    @Test
     fun missingActivityRecentLifecycleKeepsPending() {
         val reducer = UsageForegroundReducer()
         reducer.apply(resumed("target", "TargetActivity"))

@@ -39,13 +39,21 @@ class GuidanceEngineTest {
 
     @Test
     fun postureHeightVariationDoesNotPreventArrival() {
+        val route = listOf(v(0f, 1.7f, 0f), v(2f, 1.7f, 0f))
         val result = engine.calculate(
-            route = listOf(v(0f, 1.7f, 0f), v(2f, 1.7f, 0f)),
+            route = route,
             currentPosition = v(1.55f, 0.6f, 0.1f),
             currentForward = v(1f, 0f, 0f)
         )
         assertTrue(result.arrived)
         assertEquals(0.4609f, result.endpointDistanceMeters, 0.001f)
+
+        val heightOnlyChange = engine.calculate(
+            route = route,
+            currentPosition = v(1.55f, 4.0f, 0.1f),
+            currentForward = v(1f, 0f, 0f)
+        )
+        assertEquals(result.endpointDistanceMeters, heightOnlyChange.endpointDistanceMeters, 0.0001f)
     }
 
     @Test

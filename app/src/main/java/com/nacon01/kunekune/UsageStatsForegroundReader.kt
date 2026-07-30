@@ -27,7 +27,7 @@ class UsageStatsForegroundReader(private val context: Context) {
         }
         val window = queryWindow.next(nowMillis)
         if (window == null) {
-            val observation = reconcilePendingObservation(
+            val observation = reconcileRecentObservation(
                 reducer.consumeObservation(),
                 nowMillis.coerceAtLeast(0L)
             )
@@ -57,7 +57,7 @@ class UsageStatsForegroundReader(private val context: Context) {
                 event.toForegroundUsageEvent()?.let(reducer::apply)
             }
             queryWindow.commit(window.endMillis)
-            val observation = reconcilePendingObservation(
+            val observation = reconcileRecentObservation(
                 reducer.consumeObservation(),
                 window.endMillis
             )
@@ -80,11 +80,10 @@ class UsageStatsForegroundReader(private val context: Context) {
         }
     }
 
-    private fun reconcilePendingObservation(
+    private fun reconcileRecentObservation(
         observation: ForegroundUsageObservation,
         endMillis: Long
     ): ForegroundUsageObservation {
-        if (!observation.reconciliationPending) return observation
         return try {
             val recentEvents = usageStats?.queryEvents(
                 (endMillis - INITIAL_LOOKBACK_MILLIS).coerceAtLeast(0L),
@@ -96,6 +95,7 @@ class UsageStatsForegroundReader(private val context: Context) {
                 recentEvents.getNextEvent(recentEvent)
                 recentEvent.toForegroundUsageEvent()?.let(recentLifecycleEvents::add)
             }
+            if (recentLifecycleEvents.none { it.isActivityLifecycleEvent() }) return observation
             reducer.reconcileRecentLifecycle(recentLifecycleEvents)
             observation.mergeReconciledObservation(reducer.consumeObservation())
         } catch (_: SecurityException) {
@@ -103,6 +103,14 @@ class UsageStatsForegroundReader(private val context: Context) {
         } catch (_: RuntimeException) {
             observation
         }
+    }
+
+    private fun ForegroundUsageEvent.isActivityLifecycleEvent(): Boolean = when (type) {
+        ForegroundUsageEventType.ACTIVITY_RESUMED,
+        ForegroundUsageEventType.ACTIVITY_PAUSED,
+        ForegroundUsageEventType.ACTIVITY_STOPPED -> true
+        ForegroundUsageEventType.SCREEN_NON_INTERACTIVE,
+        ForegroundUsageEventType.KEYGUARD_SHOWN -> false
     }
 
     private fun resetState() {

@@ -96,4 +96,46 @@ class UsagePollObservationTest {
         assertFalse(shouldHideGuidanceForViewing(true, false, false))
         assertFalse(shouldHideGuidanceForViewing(false, true, false))
     }
+
+    @Test
+    fun noFreshPendingObservationNeverBecomesVisible() {
+        val pending = ForegroundPackageResult(
+            packageName = "target",
+            accessGranted = true,
+            hasUsableData = true,
+            reconciliationPending = true
+        )
+
+        assertFalse(
+            canShowViewingTargetWithoutFreshObservation(
+                viewingInterventionArmed = true,
+                latestUsageObservation = pending,
+                latestUsageDataAvailable = true,
+                expectedPackage = "target",
+                screenInteractive = true,
+                keyguardLocked = false
+            )
+        )
+    }
+
+    @Test
+    fun noFreshResolvedTargetObservationCanBeVisible() {
+        val resolved = ForegroundPackageResult(
+            packageName = "target",
+            accessGranted = true,
+            hasUsableData = true,
+            reconciliationPending = false
+        )
+
+        assertTrue(
+            canShowViewingTargetWithoutFreshObservation(
+                viewingInterventionArmed = true,
+                latestUsageObservation = resolved,
+                latestUsageDataAvailable = true,
+                expectedPackage = "target",
+                screenInteractive = true,
+                keyguardLocked = false
+            )
+        )
+    }
 }
