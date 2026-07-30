@@ -11,6 +11,7 @@ import android.content.pm.PackageManager
 import android.content.Intent
 import android.content.ServiceConnection
 import android.net.Uri
+import android.net.VpnService
 import android.provider.Settings
 import android.graphics.Color
 import android.opengl.GLSurfaceView
@@ -70,6 +71,7 @@ class MainActivity : Activity() {
     private lateinit var homeStatusText: TextView
     private lateinit var homeRegistrationText: TextView
     private lateinit var homeProtectionStatusText: TextView
+    private lateinit var homeDomainProtectionStatusText: TextView
     private lateinit var homeWarningText: TextView
     private lateinit var trackingManager: ArTrackingManager
     private var latestGuidanceState = GuidanceState.INACTIVE
@@ -104,6 +106,8 @@ class MainActivity : Activity() {
     private var currentScreen = AppScreen.GUIDANCE
     private var currentAppProtectionStatus = AppProtectionStatus.OUTSIDE_OFF
     private var appProtectionStatusReceived = false
+    private var currentDomainProtectionStatus = DomainProtectionStatus.OUTSIDE_OFF
+    private var domainProtectionStatusReceived = false
     private var pendingRecordingRouteName: String? = null
     private var pendingRouteId: String? = null
     private var pendingGrantedTargetIds: Set<String> = emptySet()
@@ -132,6 +136,19 @@ class MainActivity : Activity() {
                 currentAppProtectionStatus = status
                 appProtectionStatusReceived = true
                 if (::homeProtectionStatusText.isInitialized) updateHomeZoneScreenStatus()
+            }
+        }
+    }
+    private val domainProtectionStatusReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent?) {
+            if (intent?.action != DomainProtectionController.ACTION_STATUS_CHANGED) return
+            val status = intent.getStringExtra(DomainProtectionController.EXTRA_STATUS)
+                ?.let { value -> DomainProtectionStatus.entries.firstOrNull { it.name == value } }
+                ?: return
+            runOnUiThread {
+                currentDomainProtectionStatus = status
+                domainProtectionStatusReceived = true
+                if (::homeDomainProtectionStatusText.isInitialized) updateHomeZoneScreenStatus()
             }
         }
     }
@@ -533,6 +550,19 @@ class MainActivity : Activity() {
                 IntentFilter(AppProtectionController.ACTION_STATUS_CHANGED)
             )
         }
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(
+                domainProtectionStatusReceiver,
+                IntentFilter(DomainProtectionController.ACTION_STATUS_CHANGED),
+                RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(
+                domainProtectionStatusReceiver,
+                IntentFilter(DomainProtectionController.ACTION_STATUS_CHANGED)
+            )
+        }
         updateInterventionSettingsControls()
         restorePendingWorkflowState(savedInstanceState)
 
@@ -815,6 +845,7 @@ class MainActivity : Activity() {
         homeStatusText = TextView(this@MainActivity)
         homeRegistrationText = TextView(this@MainActivity)
         homeProtectionStatusText = TextView(this@MainActivity)
+        homeDomainProtectionStatusText = TextView(this@MainActivity)
         homeWarningText = TextView(this@MainActivity).apply {
             setTextColor(Color.YELLOW)
         }
@@ -825,8 +856,12 @@ class MainActivity : Activity() {
             addView(TextView(this@MainActivity).apply {
                 text = "保存した自宅を基準に、マーカーと誘導を有効化します。"
             })
+            addView(TextView(this@MainActivity).apply {
+                text = "選択したドメインのブロックには、初回のみ下のボタンでAndroid VPN権限を設定します。"
+            })
             addView(homeStatusText)
             addView(homeProtectionStatusText)
+            addView(homeDomainProtectionStatusText)
             addView(homeRegistrationText)
             addView(homeLatitudeInput); addView(homeLongitudeInput); addView(homeRadiusInput)
             addView(homeWarningText)
@@ -850,6 +885,10 @@ class MainActivity : Activity() {
                         Uri.parse("package:$packageName")
                     ))
                 }
+            })
+            addView(Button(this@MainActivity).apply {
+                text = "VPN権限を設定（ドメイン保護）"
+                setOnClickListener { requestDomainVpnPermission() }
             })
             addView(Button(this@MainActivity).apply {
                 text = "現在地を自宅に設定"
@@ -983,6 +1022,8 @@ class MainActivity : Activity() {
             else -> "実行状態: 自宅外（OFF）"
         }
         homeProtectionStatusText.text = "アプリ保護: ${currentAppProtectionStatus.displayName()}"
+        homeDomainProtectionStatusText.text =
+            "ドメイン保護: ${currentDomainProtectionStatus.displayName()}"
         homeRegistrationText.text = "ジオフェンス: ${when (homeZoneGeofenceManager.registrationStatus) {
             HomeZoneGeofenceRegistrationStatus.REGISTERED -> "登録済み"
             HomeZoneGeofenceRegistrationStatus.NOT_REGISTERED -> "未登録"
@@ -1013,11 +1054,43 @@ class MainActivity : Activity() {
         AppProtectionStatus.ERROR -> "エラー"
     }
 
+    private fun DomainProtectionStatus.displayName(): String = when (this) {
+        DomainProtectionStatus.ACTIVE -> "有効"
+        DomainProtectionStatus.OUTSIDE_OFF -> "自宅外・OFF"
+        DomainProtectionStatus.NO_SELECTED_DOMAIN_TARGET -> "選択中のドメイン対象なし"
+        DomainProtectionStatus.VPN_PERMISSION_REQUIRED -> "VPN権限が必要"
+        DomainProtectionStatus.STARTING -> "起動中"
+        DomainProtectionStatus.ERROR -> "エラー"
+    }
+
     private fun reconcileAppProtection() {
         val result = AppProtectionController.reconcile(this)
         currentAppProtectionStatus = result.status
         appProtectionStatusReceived = true
+        val domainResult = DomainProtectionController.reconcile(this)
+        currentDomainProtectionStatus = domainResult.status
+        domainProtectionStatusReceived = true
         if (::homeProtectionStatusText.isInitialized) updateHomeZoneScreenStatus()
+    }
+
+    private fun requestDomainVpnPermission() {
+        val prepareIntent = try {
+            VpnService.prepare(this)
+        } catch (_: Exception) {
+            currentDomainProtectionStatus = DomainProtectionStatus.ERROR
+            domainProtectionStatusReceived = true
+            DomainProtectionController.publishStatus(this, DomainProtectionStatus.ERROR)
+            if (::homeDomainProtectionStatusText.isInitialized) updateHomeZoneScreenStatus()
+            return
+        }
+        if (prepareIntent != null) {
+            startActivityForResult(prepareIntent, VPN_PERMISSION_REQUEST)
+        } else {
+            val result = DomainProtectionController.reconcile(this)
+            currentDomainProtectionStatus = result.status
+            domainProtectionStatusReceived = true
+            updateHomeZoneScreenStatus()
+        }
     }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
@@ -1120,6 +1193,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         try { unregisterReceiver(homeZoneStateReceiver) } catch (_: IllegalArgumentException) { }
         try { unregisterReceiver(appProtectionStatusReceiver) } catch (_: IllegalArgumentException) { }
+        try { unregisterReceiver(domainProtectionStatusReceiver) } catch (_: IllegalArgumentException) { }
         if (::guidanceHint.isInitialized) guidanceHint.removeCallbacks(viewingLaunchRetry)
         if (::guidanceHint.isInitialized) guidanceHint.removeCallbacks(guidanceStopCompletion)
         resetArrivalMessage()
@@ -1182,6 +1256,24 @@ class MainActivity : Activity() {
                 debugHud.showError("カメラ権限が拒否されました。ARトラッキングにはカメラ権限が必要です。")
             }
         }
+    }
+
+    @Deprecated("Android VPN consent uses the activity result contract on this legacy activity.")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != VPN_PERMISSION_REQUEST) return
+        if (resultCode == RESULT_OK) {
+            val result = DomainProtectionController.reconcile(this)
+            currentDomainProtectionStatus = result.status
+            domainProtectionStatusReceived = true
+        } else {
+            currentDomainProtectionStatus = DomainProtectionStatus.VPN_PERMISSION_REQUIRED
+            domainProtectionStatusReceived = true
+            DomainProtectionController.publishStatus(
+                this, DomainProtectionStatus.VPN_PERMISSION_REQUIRED
+            )
+        }
+        if (::homeDomainProtectionStatusText.isInitialized) updateHomeZoneScreenStatus()
     }
 
     private fun onDepartureButtonClicked() {
@@ -2246,6 +2338,7 @@ class MainActivity : Activity() {
         private const val NOTIFICATION_PERMISSION_REQUEST = 1002
         private const val HOME_FOREGROUND_LOCATION_PERMISSION_REQUEST = 1003
         private const val HOME_BACKGROUND_LOCATION_PERMISSION_REQUEST = 1004
+        private const val VPN_PERMISSION_REQUEST = 1005
         private const val SERVICE_STOP_POLL_INTERVAL_MILLIS = 50L
         private const val YOUTUBE_PACKAGE = "com.google.android.youtube"
         private const val YOUTUBE_HOME_URL = "https://www.youtube.com/"

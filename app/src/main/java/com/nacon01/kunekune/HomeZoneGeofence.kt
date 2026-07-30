@@ -180,6 +180,7 @@ class HomeZoneGeofenceManager(
                 ?: LocationObservation.UNKNOWN
             coordinator.observe(observation)
             AppProtectionController.reconcile(appContext)
+            DomainProtectionController.reconcile(appContext)
             onComplete(observation)
         }
     }
@@ -241,8 +242,10 @@ class HomeZoneGeofenceReceiver : BroadcastReceiver() {
             appContext.stopService(Intent(appContext, BackgroundTrackingService::class.java))
             appContext.stopService(Intent(appContext, AppProtectionService::class.java))
             AppProtectionController.publishStatus(appContext, AppProtectionStatus.OUTSIDE_OFF)
+            DomainProtectionController.stop(appContext)
         } else {
             AppProtectionController.reconcile(appContext)
+            DomainProtectionController.reconcile(appContext)
         }
         publishStateChanged(appContext, coordinator.snapshot())
     }
@@ -263,14 +266,17 @@ class HomeZoneBootReceiver : BroadcastReceiver() {
         if (intent?.action != Intent.ACTION_BOOT_COMPLETED) return
         val appContext = context.applicationContext
         AppProtectionController.reconcile(appContext)
+        DomainProtectionController.reconcile(appContext)
         val pendingResult = goAsync()
         try {
             HomeZoneGeofenceManager(appContext).registerOrUpdate {
                 AppProtectionController.reconcile(appContext)
+                DomainProtectionController.reconcile(appContext)
                 pendingResult.finish()
             }
         } catch (_: Exception) {
             AppProtectionController.reconcile(appContext)
+            DomainProtectionController.reconcile(appContext)
             pendingResult.finish()
         }
     }
