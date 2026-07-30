@@ -45,7 +45,9 @@ class ArTrackingManager(context: Context) {
     private val markerAnchor = MarkerAnchor(appContext)
     private val routeRecorder = RouteRecorder()
     private val routeStore = RouteStore(appContext)
-    private var savedRoute: RecordedRoute? = loadSavedRoute()
+    private val routeRepository = RouteRepository(appContext)
+    private var selectedRouteIdValue: String? = null
+    private var savedRoute: RecordedRoute? = loadInitialRoute()
     private var savedRouteSummary = savedRoute?.summary()
     private var savedGuidanceRoute = savedRoute?.points?.map { GuidanceVector3(it.x, it.y, it.z) }
     private var session: Session? = null
@@ -80,6 +82,42 @@ class ArTrackingManager(context: Context) {
     val isRecording: Boolean
         get() = routeRecorder.isRecording
 
+    val selectedRouteId: String?
+        get() = selectedRouteIdValue
+
+    val selectedRouteIdentifier: String?
+        get() = selectedRouteIdValue
+
+    fun availableRoutes(): List<DestinationRoute> = try {
+        routeRepository.list()
+    } catch (_: Exception) {
+        emptyList()
+    }
+
+    fun selectRoute(routeId: String): Boolean {
+        val route = try {
+            routeRepository.get(routeId)
+        } catch (_: Exception) {
+            null
+        } ?: return false
+        selectedRouteIdValue = route.id
+        applySavedRoute(route.route)
+        return true
+    }
+
+    fun selectRouteById(routeId: String): Boolean = selectRoute(routeId)
+
+    fun hasValidSelectedRoute(): Boolean =
+        savedGuidanceRoute?.let(StoredRouteValidator::isValid) == true
+
+    fun clearSelectedRoute() {
+        selectedRouteIdValue = null
+        savedRoute = null
+        savedRouteSummary = null
+        savedGuidanceRoute = null
+        invalidateWorldRouteCache()
+    }
+
     fun startRecording(): Boolean {
         if (routeRecorder.isRecording || latestMarkerState != MarkerDetectionState.TRACKING) return false
         routeRecorder.start()
@@ -88,16 +126,20 @@ class ArTrackingManager(context: Context) {
 
     fun stopRecording(): Boolean {
         val route = routeRecorder.stop() ?: return false
+        applySavedRoute(route)
+        return true
+    }
+
+    fun finishRecordingIntoCatalog(name: String): DestinationRoute? {
+        val route = routeRecorder.stop() ?: return null
         return try {
-            routeStore.save(route)
-            savedRoute = route
-            savedRouteSummary = route.summary()
-            savedGuidanceRoute = route.points.map { GuidanceVector3(it.x, it.y, it.z) }
-            invalidateWorldRouteCache()
-            true
+            routeRepository.create(name, route).also { destination ->
+                selectedRouteIdValue = destination.id
+                applySavedRoute(destination.route)
+            }
         } catch (_: Exception) {
             reportError("経路を保存できませんでした。")
-            false
+            null
         }
     }
 
@@ -406,10 +448,19 @@ class ArTrackingManager(context: Context) {
         )
     }
 
-    private fun loadSavedRoute(): RecordedRoute? = try {
-        routeStore.load()
+    private fun loadInitialRoute(): RecordedRoute? = try {
+        val routes = routeRepository.list()
+        routes.firstOrNull()?.also { selectedRouteIdValue = it.id }?.route
+            ?: routeStore.load()
     } catch (_: Exception) {
-        null
+        try { routeStore.load() } catch (_: Exception) { null }
+    }
+
+    private fun applySavedRoute(route: RecordedRoute) {
+        savedRoute = route
+        savedRouteSummary = route.summary()
+        savedGuidanceRoute = route.points.map { GuidanceVector3(it.x, it.y, it.z) }
+        invalidateWorldRouteCache()
     }
 
     private fun discardFailedSession() {

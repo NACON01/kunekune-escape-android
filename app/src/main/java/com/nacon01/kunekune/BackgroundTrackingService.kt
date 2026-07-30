@@ -118,6 +118,7 @@ class BackgroundTrackingService : Service() {
         InterventionPreferences.DEFAULT_LEAVE_DESTINATION_FADE_MINUTES
     )
     private val pendingViewingLaunch = PendingViewingLaunch()
+    private var sessionGrant: SessionGrant? = null
     private var viewingUsageTracker: ContinuousViewingTracker? = null
     @Volatile
     private var launchedViewingPackage: String? = null
@@ -187,11 +188,20 @@ class BackgroundTrackingService : Service() {
         noUsageDataSinceNanos = null
         viewingInterventionArmed = false
         viewingCurrentlyVisible = false
+        try {
+            sessionGrant = if (guidanceMode && SessionGrantExtras.hasAny(intent ?: Intent())) {
+                checkNotNull(SessionGrantExtras.readFrom(intent!!)).also(::validateSessionGrant)
+            } else {
+                null
+            }
+        } catch (exception: Exception) {
+            failBeforeWorker(exceptionMessage(exception))
+            return START_NOT_STICKY
+        }
         pendingViewingLaunch.prepare(
             if (guidanceMode) {
-                intent?.getStringExtra(EXTRA_VIEWING_TARGET)?.let { stored ->
-                    ViewingTarget.entries.firstOrNull { it.name == stored }
-                }
+                sessionGrant?.initialTargetId ?: intent?.getStringExtra(EXTRA_VIEWING_TARGET)
+                    ?.let { stored -> ViewingTarget.entries.firstOrNull { it.name == stored }?.name }
             } else {
                 null
             }
@@ -238,6 +248,7 @@ class BackgroundTrackingService : Service() {
         cancellation.set(true)
         stopUsagePolling()
         pendingViewingLaunch.clear()
+        sessionGrant = null
         viewingUsageTracker?.reset()
         viewingUsageTracker = null
         val ownerThread = workerThread
@@ -281,18 +292,25 @@ class BackgroundTrackingService : Service() {
         terminalFailureStatus.acknowledge()
     }
 
+    fun pendingViewingTargetIdIfReady(): String? =
+        pendingViewingLaunch.pendingTargetIdIfReady()
+
     fun pendingViewingTargetIfReady(): ViewingTarget? =
         pendingViewingLaunch.pendingTargetIfReady()
 
-    fun acknowledgeViewingTargetLaunched(target: ViewingTarget, packageName: String): Boolean {
+    fun acknowledgeViewingTargetIdLaunched(targetId: String, packageName: String): Boolean {
         if (packageName.isBlank()) return false
-        val acknowledged = pendingViewingLaunch.complete(target, packageName)
+        val acknowledged = pendingViewingLaunch.completeTarget(targetId, packageName)
         if (acknowledged) {
             launchedViewingPackage = packageName
             viewingLaunchAcknowledgedNanos = System.nanoTime()
             startUsagePolling()
         }
         return acknowledged
+    }
+
+    fun acknowledgeViewingTargetLaunched(target: ViewingTarget, packageName: String): Boolean {
+        return acknowledgeViewingTargetIdLaunched(target.name, packageName)
     }
 
     fun launchedViewingPackage(): String? = launchedViewingPackage
@@ -867,13 +885,34 @@ class BackgroundTrackingService : Service() {
     )
 
     private fun loadAndValidateRoute(): List<GuidanceVector3> {
-        val route = RouteStore(applicationContext).load()
+        val route = sessionGrant?.let { grant ->
+            RouteRepository(applicationContext).get(grant.routeId)
+                ?: throw IllegalStateException("選択した経路が見つかりません")
+        } ?: RouteStore(applicationContext).load()
             ?: throw IllegalStateException("保存済み経路がありません")
-        val points = route.points.map { GuidanceVector3(it.x, it.y, it.z) }
-        check(StoredRouteValidator.isValid(points)) {
+        val points = (route as? DestinationRoute)?.route?.points
+            ?: (route as RecordedRoute).points
+        val guidancePoints = points.map { GuidanceVector3(it.x, it.y, it.z) }
+        check(StoredRouteValidator.isValid(guidancePoints)) {
             "経路が短すぎるか、有効な2点を含んでいません"
         }
-        return points
+        return guidancePoints
+    }
+
+    private fun validateSessionGrant(grant: SessionGrant) {
+        val route = RouteRepository(applicationContext).get(grant.routeId)
+            ?: throw IllegalArgumentException("選択した経路が見つかりません")
+        val targetStore = BlockTargetStore(applicationContext)
+        val selectedIds = targetStore.selectedTargetIds()
+        check(grant.grantedTargetIds.all { it in selectedIds && targetStore.get(it) != null }) {
+            "許可対象が現在の選択対象と一致しません"
+        }
+        check(grant.initialTargetId in grant.grantedTargetIds) {
+            "初回起動対象が許可対象に含まれていません"
+        }
+        check(StoredRouteValidator.isValid(route.route.points.map { GuidanceVector3(it.x, it.y, it.z) })) {
+            "選択した経路が無効です"
+        }
     }
 
     private fun ensureOverlay(): Boolean {
@@ -1061,6 +1100,10 @@ class BackgroundTrackingService : Service() {
         const val ACTION_START_GUIDANCE = "com.nacon01.kunekune.action.START_GUIDANCE"
         const val EXTRA_VIEWING_TARGET = "com.nacon01.kunekune.extra.VIEWING_TARGET"
         const val EXTRA_ARRIVAL_BEHAVIOR = "com.nacon01.kunekune.extra.ARRIVAL_BEHAVIOR"
+        const val EXTRA_ROUTE_ID = "com.nacon01.kunekune.extra.ROUTE_ID"
+        const val EXTRA_GRANTED_TARGET_IDS = "com.nacon01.kunekune.extra.GRANTED_TARGET_IDS"
+        const val EXTRA_INITIAL_TARGET_ID = "com.nacon01.kunekune.extra.INITIAL_TARGET_ID"
+        const val EXTRA_VISIT_GENERATION = "com.nacon01.kunekune.extra.VISIT_GENERATION"
 
         @Volatile
         var currentState: BackgroundTrackingState = BackgroundTrackingState.IDLE

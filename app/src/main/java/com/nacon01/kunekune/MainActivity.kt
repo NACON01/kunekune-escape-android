@@ -25,7 +25,12 @@ import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.RadioButton
+import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.CheckBox
+import android.widget.Toast
+import android.view.View
 import com.google.ar.core.ArCoreApk
 import com.google.ar.core.exceptions.UnavailableApkTooOldException
 import com.google.ar.core.exceptions.UnavailableDeviceNotCompatibleException
@@ -52,8 +57,11 @@ class MainActivity : Activity() {
     private lateinit var leaveDestinationFadeMinusButton: Button
     private lateinit var leaveDestinationFadeValueButton: Button
     private lateinit var leaveDestinationFadePlusButton: Button
-    private lateinit var viewingTargetButton: Button
     private lateinit var guidanceHint: TextView
+    private lateinit var screenContainer: FrameLayout
+    private lateinit var guidanceControls: LinearLayout
+    private lateinit var bottomNavigation: LinearLayout
+    private lateinit var settingsScreenView: View
     private lateinit var trackingManager: ArTrackingManager
     private var latestGuidanceState = GuidanceState.INACTIVE
     private var installRequested = false
@@ -79,6 +87,15 @@ class MainActivity : Activity() {
     private var viewingLaunchRetryScheduled = false
     private var viewingLaunchAttempts = 0
     private var guidanceStopCompletionPosted = false
+    private var currentScreen = AppScreen.GUIDANCE
+    private var pendingRecordingRouteName: String? = null
+    private var pendingRouteId: String? = null
+    private var pendingGrantedTargetIds: Set<String> = emptySet()
+    private var pendingInitialTargetId: String? = null
+    private var pendingSessionGrant: SessionGrant? = null
+    private val routeRepository by lazy { RouteRepository(this) }
+    private val blockTargetStore by lazy { BlockTargetStore(this) }
+    private val homeZonePreferences by lazy { HomeZonePreferences(this) }
     private val arrivalMessageController = ArrivalMessageController()
     private val arrivalMessageHandler = Handler(Looper.getMainLooper())
     private var pendingArrivalSnapshot: TrackingSnapshot? = null
@@ -181,10 +198,25 @@ class MainActivity : Activity() {
             isEnabled = false
             setOnClickListener {
                 if (trackingManager.isRecording) {
-                    trackingManager.stopRecording()
-                } else if (trackingManager.startRecording()) {
+                    val routeName = pendingRecordingRouteName
+                    if (routeName == null) {
+                        trackingManager.stopRecording()
+                    } else {
+                        val saved = trackingManager.finishRecordingIntoCatalog(routeName)
+                        if (saved == null) {
+                            guidanceHint.text = "経路を保存できませんでした"
+                        } else {
+                            pendingRecordingRouteName = null
+                            Toast.makeText(this@MainActivity, "経路を登録しました", Toast.LENGTH_SHORT).show()
+                            showScreen(AppScreen.ROUTES)
+                            rebuildRouteScreen()
+                        }
+                    }
+                } else if (pendingRecordingRouteName != null && trackingManager.startRecording()) {
                     text = "記録終了"
                     isEnabled = true
+                } else if (pendingRecordingRouteName == null) {
+                    guidanceHint.text = "経路画面から目的地名を入力してください"
                 }
             }
         }
@@ -268,12 +300,6 @@ class MainActivity : Activity() {
                 updateInterventionSettingsControls()
             }
         }
-        viewingTargetButton = Button(this).apply {
-            setOnClickListener {
-                InterventionPreferences.cycleViewingTarget(this@MainActivity)
-                updateInterventionSettingsControls()
-            }
-        }
         guidanceHint = TextView(this).apply {
             setTextColor(Color.WHITE)
             textSize = 12f
@@ -322,7 +348,6 @@ class MainActivity : Activity() {
             addView(viewingThresholdMinusButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(viewingThresholdValueButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(viewingThresholdPlusButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-            addView(viewingTargetButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
         val progressRewardRow = LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL
@@ -349,7 +374,7 @@ class MainActivity : Activity() {
             addView(leaveDestinationFadeValueButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(leaveDestinationFadePlusButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         }
-        val bottomControls = LinearLayout(this).apply {
+        guidanceControls = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             addView(buttonRow, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -359,30 +384,47 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
-            addView(fadeSettingsRow, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
-            addView(viewingThresholdRow, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
-            addView(progressRewardRow, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
-            addView(arrivalFadeRow, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
-            addView(leaveDestinationFadeRow, LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-            ))
             addView(guidanceHint, LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
+        }
+
+        val settingsContent = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(18), dp(12), dp(96))
+            addView(TextView(this@MainActivity).apply { text = "設定"; textSize = 22f })
+            addView(fadeSettingsRow)
+            addView(viewingThresholdRow)
+            addView(progressRewardRow)
+            addView(arrivalFadeRow)
+            addView(leaveDestinationFadeRow)
+        }
+        val settingsScreen = ScrollView(this).apply { addView(settingsContent) }
+        settingsScreenView = settingsScreen
+
+        screenContainer = FrameLayout(this).apply {
+            setBackgroundColor(Color.BLACK)
+            addView(settingsScreen, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+            ))
+        }
+
+        bottomNavigation = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            setBackgroundColor(Color.rgb(28, 28, 28))
+            listOf(
+                AppScreen.GUIDANCE to "誘導",
+                AppScreen.ROUTES to "経路",
+                AppScreen.TARGETS to "対象",
+                AppScreen.HOME to "自宅",
+                AppScreen.SETTINGS to "設定"
+            ).forEach { (screen, label) ->
+                addView(Button(this@MainActivity).apply {
+                    text = label
+                    setOnClickListener { showScreen(screen) }
+                }, LinearLayout.LayoutParams(0, dp(56), 1f))
+            }
         }
 
         val root = FrameLayout(this).apply {
@@ -399,22 +441,334 @@ class MainActivity : Activity() {
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT
             ))
-            addView(bottomControls, FrameLayout.LayoutParams(
+            addView(guidanceControls, FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.WRAP_CONTENT,
                 Gravity.BOTTOM
             ).apply {
                 val margin = (resources.displayMetrics.density * 12).toInt()
-                setMargins(margin, margin, margin, margin)
+                setMargins(margin, margin, margin, dp(68))
             })
+            addView(screenContainer, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+            ))
+            addView(bottomNavigation, FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, dp(56), Gravity.BOTTOM
+            ))
         }
         setContentView(root)
         updateInterventionSettingsControls()
+        restorePendingWorkflowState(savedInstanceState)
 
         if (checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION_REQUEST)
         }
     }
+
+    private fun showScreen(screen: AppScreen) {
+        currentScreen = screen
+        if (screen == AppScreen.GUIDANCE) {
+            screenContainer.visibility = View.GONE
+            guidanceControls.visibility = View.VISIBLE
+            return
+        }
+        guidanceControls.visibility = View.GONE
+        screenContainer.visibility = View.VISIBLE
+        screenContainer.removeAllViews()
+        val view = when (screen) {
+            AppScreen.ROUTES -> buildRouteScreen()
+            AppScreen.TARGETS -> buildTargetScreen()
+            AppScreen.HOME -> buildHomeScreen()
+            AppScreen.SETTINGS -> settingsScreenView
+            AppScreen.GUIDANCE -> error("unreachable")
+        }
+        screenContainer.addView(view, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
+        ))
+    }
+
+    private fun rebuildRouteScreen() {
+        if (currentScreen == AppScreen.ROUTES) showScreen(AppScreen.ROUTES)
+    }
+
+    private fun rebuildTargetScreen() {
+        if (currentScreen == AppScreen.TARGETS) showScreen(AppScreen.TARGETS)
+    }
+
+    private fun buildRouteScreen(): View = ScrollView(this).apply {
+        addView(LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(18), dp(12), dp(96))
+            addView(TextView(this@MainActivity).apply { text = "経路"; textSize = 22f })
+            addView(Button(this@MainActivity).apply {
+                text = "新しい経路を登録"
+                setOnClickListener { showRouteNameDialog() }
+            })
+            val routes = try { routeRepository.list() } catch (exception: Exception) {
+                addView(TextView(this@MainActivity).apply {
+                    text = "経路を読み込めませんでした: ${exception.message ?: "不明なエラー"}"
+                })
+                emptyList()
+            }
+            if (routes.isEmpty()) {
+                addView(TextView(this@MainActivity).apply { text = "登録された経路はありません" })
+            }
+            routes.forEach { route ->
+                val row = LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.VERTICAL
+                    setPadding(0, dp(10), 0, dp(6))
+                }
+                row.addView(TextView(this@MainActivity).apply {
+                    text = "${route.name}${if (route.id == trackingManager.selectedRouteIdentifier) "（選択中）" else ""}"
+                    textSize = 18f
+                })
+                row.addView(TextView(this@MainActivity).apply {
+                    text = "${route.points.size} 点 / ${"%.1f".format(route.totalDistanceMeters)} m"
+                })
+                row.addView(LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    addView(Button(this@MainActivity).apply {
+                        text = "この経路を選択"
+                        isEnabled = route.id != trackingManager.selectedRouteIdentifier
+                        setOnClickListener {
+                            if (trackingManager.selectRoute(route.id)) {
+                                Toast.makeText(this@MainActivity, "経路を選択しました", Toast.LENGTH_SHORT).show()
+                                rebuildRouteScreen()
+                            }
+                        }
+                    }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                    addView(Button(this@MainActivity).apply {
+                        text = "削除"
+                        setOnClickListener { confirmDeleteRoute(route) }
+                    }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                })
+                addView(row)
+            }
+        })
+    }
+
+    private fun showRouteNameDialog() {
+        val input = EditText(this).apply { hint = "目的地名" }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("経路を登録")
+            .setMessage("マーカーを認識してから経路を記録します")
+            .setView(input)
+            .setPositiveButton("記録画面へ", null)
+            .setNegativeButton("キャンセル", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val name = input.text.toString().trim()
+                val duplicate = try {
+                    routeRepository.list().any { routeNameKey(it.name) == routeNameKey(name) }
+                } catch (_: Exception) { false }
+                if (name.isEmpty()) input.error = "目的地名を入力してください"
+                else if (duplicate) input.error = "同じ目的地名がすでにあります"
+                else {
+                    pendingRecordingRouteName = name
+                    dialog.dismiss()
+                    showScreen(AppScreen.GUIDANCE)
+                    guidanceHint.text = "マーカーを認識して記録を開始してください"
+                }
+            }
+        }
+        dialog.setOnCancelListener { pendingRecordingRouteName = null }
+        dialog.show()
+    }
+
+    private fun confirmDeleteRoute(route: DestinationRoute) {
+        AlertDialog.Builder(this)
+            .setTitle("経路を削除")
+            .setMessage("「${route.name}」を削除しますか？")
+            .setPositiveButton("削除") { _, _ ->
+                try {
+                    routeRepository.delete(route.id)
+                    if (trackingManager.selectedRouteIdentifier == route.id) {
+                        routeRepository.list().firstOrNull()?.let { trackingManager.selectRoute(it.id) }
+                            ?: trackingManager.clearSelectedRoute()
+                    }
+                    rebuildRouteScreen()
+                } catch (_: Exception) {
+                    guidanceHint.text = "経路を削除できませんでした"
+                }
+            }
+            .setNegativeButton("キャンセル", null)
+            .show()
+    }
+
+    private fun buildTargetScreen(): View = ScrollView(this).apply {
+        addView(LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(18), dp(12), dp(96))
+            addView(TextView(this@MainActivity).apply { text = "対象"; textSize = 22f })
+            addView(LinearLayout(this@MainActivity).apply {
+                orientation = LinearLayout.HORIZONTAL
+                addView(Button(this@MainActivity).apply {
+                    text = "アプリを追加"
+                    setOnClickListener { showAppTargetDialog() }
+                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                addView(Button(this@MainActivity).apply {
+                    text = "ドメインを追加"
+                    setOnClickListener { showDomainTargetDialog() }
+                }, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            })
+            val selectedIds = blockTargetStore.selectedTargetIds()
+            val initialId = blockTargetStore.initialTargetId()
+            blockTargetStore.all().forEach { target ->
+                addView(LinearLayout(this@MainActivity).apply {
+                    orientation = LinearLayout.HORIZONTAL
+                    val selected = CheckBox(this@MainActivity).apply {
+                        text = target.displayName()
+                        isChecked = target.id in selectedIds
+                        setOnClickListener {
+                            blockTargetStore.setSelected(target.id, isChecked)
+                            rebuildTargetScreen()
+                        }
+                    }
+                    addView(selected, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+                    addView(RadioButton(this@MainActivity).apply {
+                        text = "初回"
+                        isChecked = target.id == initialId
+                        isEnabled = target.id in selectedIds
+                        setOnClickListener {
+                            if (isChecked) blockTargetStore.setInitialTargetId(target.id)
+                            rebuildTargetScreen()
+                        }
+                    })
+                    addView(Button(this@MainActivity).apply {
+                        text = "削除"
+                        setOnClickListener {
+                            AlertDialog.Builder(this@MainActivity)
+                                .setTitle("対象を削除")
+                                .setMessage("${target.displayName()}を削除しますか？")
+                                .setPositiveButton("削除") { _, _ ->
+                                    blockTargetStore.remove(target.id)
+                                    rebuildTargetScreen()
+                                }
+                                .setNegativeButton("キャンセル", null)
+                                .show()
+                        }
+                    })
+                })
+            }
+            if (blockTargetStore.all().isEmpty()) {
+                addView(TextView(this@MainActivity).apply { text = "対象が登録されていません" })
+            }
+        })
+    }
+
+    private fun showAppTargetDialog() {
+        val launcherIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_LAUNCHER)
+        val apps = packageManager.queryIntentActivities(launcherIntent, PackageManager.MATCH_ALL)
+            .filter { it.activityInfo.packageName != packageName }
+            .groupBy { it.activityInfo.packageName }
+            .map { (_, infos) -> infos.first() }
+            .sortedBy { it.loadLabel(packageManager).toString().lowercase() }
+        if (apps.isEmpty()) {
+            Toast.makeText(this, "追加できるアプリがありません", Toast.LENGTH_SHORT).show()
+            return
+        }
+        val labels = apps.map { it.loadLabel(packageManager).toString() }.toTypedArray()
+        val checked = BooleanArray(labels.size)
+        AlertDialog.Builder(this)
+            .setTitle("アプリを追加")
+            .setMultiChoiceItems(labels, checked) { _, which, isChecked -> checked[which] = isChecked }
+            .setPositiveButton("追加") { _, _ ->
+                apps.filterIndexed { index, _ -> checked[index] }.forEach { info ->
+                    blockTargetStore.add(BlockTarget.app(
+                        info.activityInfo.packageName,
+                        info.loadLabel(packageManager).toString()
+                    ))
+                }
+                rebuildTargetScreen()
+            }
+            .setNegativeButton("キャンセル", null)
+            .show()
+    }
+
+    private fun showDomainTargetDialog() {
+        val input = EditText(this).apply { hint = "example.com または https://example.com" }
+        val includeSubdomains = CheckBox(this).apply { text = "サブドメインも含める" }
+        val content = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), 0, dp(20), 0)
+            addView(input)
+            addView(includeSubdomains)
+        }
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("ドメインを追加")
+            .setView(content)
+            .setPositiveButton("追加", null)
+            .setNegativeButton("キャンセル", null)
+            .create()
+        dialog.setOnShowListener {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                try {
+                    blockTargetStore.add(BlockTarget.domain(input.text.toString(), includeSubdomains.isChecked))
+                    dialog.dismiss()
+                    rebuildTargetScreen()
+                } catch (exception: IllegalArgumentException) {
+                    input.error = exception.message ?: "入力を確認してください"
+                }
+            }
+        }
+        dialog.show()
+    }
+
+    private fun buildHomeScreen(): View = ScrollView(this).apply {
+        val config = homeZonePreferences.get()
+        val latitude = EditText(this@MainActivity).apply {
+            hint = "緯度"
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            config?.latitude?.let { setText(it.toString()) }
+        }
+        val longitude = EditText(this@MainActivity).apply {
+            hint = "経度"
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            config?.longitude?.let { setText(it.toString()) }
+        }
+        val radius = EditText(this@MainActivity).apply {
+            hint = "半径（m）"
+            inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
+            config?.radiusMeters?.let { setText(it.toString()) }
+        }
+        val warning = TextView(this@MainActivity).apply {
+            setTextColor(Color.YELLOW)
+            text = if (config?.hasSmallRadiusWarning == true) "半径が100m未満です" else ""
+        }
+        addView(LinearLayout(this@MainActivity).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(12), dp(18), dp(12), dp(96))
+            addView(TextView(this@MainActivity).apply { text = "自宅"; textSize = 22f })
+            addView(TextView(this@MainActivity).apply { text = "現在地は取得せず、入力値だけを保存します。" })
+            addView(latitude); addView(longitude); addView(radius); addView(warning)
+            addView(Button(this@MainActivity).apply {
+                text = "保存"
+                setOnClickListener {
+                    try {
+                        val saved = HomeZoneConfig(
+                            latitude.text.toString().trim().toDouble(),
+                            longitude.text.toString().trim().toDouble(),
+                            radius.text.toString().trim().toDouble()
+                        )
+                        homeZonePreferences.save(saved)
+                        warning.setTextColor(Color.YELLOW)
+                        warning.text = if (saved.hasSmallRadiusWarning) "半径が100m未満です" else "保存しました"
+                    } catch (exception: Exception) {
+                        warning.text = exception.message ?: "入力を確認してください"
+                        warning.setTextColor(Color.RED)
+                    }
+                }
+            })
+        })
+    }
+
+    private fun BlockTarget.displayName(): String = when (this) {
+        is BlockTarget.App -> label
+        is BlockTarget.Domain -> "$host${if (includeSubdomains) "（サブドメイン含む）" else ""}"
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     override fun onResume() {
         super.onResume()
@@ -456,6 +810,31 @@ class MainActivity : Activity() {
             STATE_PENDING_PICTURE_IN_PICTURE_PACKAGE,
             pendingPictureInPicturePackage
         )
+        outState.putBoolean(STATE_PENDING_WORKFLOW_PRESENT, hasPendingWorkflow())
+        outState.putString(STATE_PENDING_ROUTE_ID, pendingRouteId)
+        outState.putStringArrayList(
+            STATE_PENDING_GRANTED_TARGET_IDS,
+            ArrayList(pendingGrantedTargetIds.sorted())
+        )
+        outState.putString(STATE_PENDING_INITIAL_TARGET_ID, pendingInitialTargetId)
+        if (pendingSessionGrant != null) {
+            val grant = pendingSessionGrant!!
+            outState.putBoolean(STATE_PENDING_SESSION_GRANT_PRESENT, true)
+            outState.putLong(STATE_PENDING_SESSION_GRANT_VISIT_GENERATION, grant.visitGeneration)
+            outState.putString(STATE_PENDING_SESSION_GRANT_ROUTE_ID, grant.routeId)
+            outState.putStringArrayList(
+                STATE_PENDING_SESSION_GRANT_TARGET_IDS,
+                ArrayList(grant.grantedTargetIds.sorted())
+            )
+            outState.putString(
+                STATE_PENDING_SESSION_GRANT_INITIAL_TARGET_ID,
+                grant.initialTargetId
+            )
+        } else {
+            outState.putBoolean(STATE_PENDING_SESSION_GRANT_PRESENT, false)
+        }
+        outState.putString(STATE_PENDING_RECORDING_ROUTE_NAME, pendingRecordingRouteName)
+        outState.putString(STATE_CURRENT_SCREEN, currentScreen.name)
         super.onSaveInstanceState(outState)
     }
 
@@ -541,6 +920,11 @@ class MainActivity : Activity() {
             guidanceHint.text = "有効な保存済み経路がないため開始できません"
             return
         }
+        if (!hasValidTargetSelection()) {
+            guidanceHint.text = "対象画面で初回起動対象を選択してください"
+            showScreen(AppScreen.TARGETS)
+            return
+        }
         usageSettingsOpened = false
         overlaySettingsOpened = false
         pendingPictureInPicturePackage = null
@@ -557,6 +941,11 @@ class MainActivity : Activity() {
         }
 
         if (pendingArrivalBehavior == null) return
+
+        if (pendingSessionGrant == null) {
+            showDestinationSelectionDialog()
+            return
+        }
 
         if (!UsageStatsForegroundReader.hasUsageAccess(this)) {
             guidancePendingStart = true
@@ -578,13 +967,14 @@ class MainActivity : Activity() {
     }
 
     private fun hasValidSavedRoute(): Boolean {
-        val savedRoute = try {
-            RouteStore(this).load()
-        } catch (_: Exception) {
-            null
-        }
-        val points = savedRoute?.points?.map { GuidanceVector3(it.x, it.y, it.z) }
-        return points != null && StoredRouteValidator.isValid(points)
+        return trackingManager.hasValidSelectedRoute()
+    }
+
+    private fun hasValidTargetSelection(): Boolean {
+        val selected = blockTargetStore.selectedTargetIds()
+        val initial = blockTargetStore.initialTargetId()
+        return selected.isNotEmpty() && initial != null && initial in selected &&
+            selected.all { blockTargetStore.get(it) != null }
     }
 
     private fun updateInterventionSettingsControls() {
@@ -616,7 +1006,146 @@ class MainActivity : Activity() {
             leaveDestinationFadeMinutes > InterventionPreferences.LEAVE_DESTINATION_FADE_MIN_MINUTES
         leaveDestinationFadePlusButton.isEnabled =
             leaveDestinationFadeMinutes < InterventionPreferences.LEAVE_DESTINATION_FADE_MAX_MINUTES
-        viewingTargetButton.text = InterventionPreferences.viewingTarget(this).displayName
+    }
+
+    private fun hasPendingWorkflow(): Boolean =
+        guidancePendingStart || viewingStartPending || pendingArrivalBehavior != null ||
+            pendingPictureInPicturePackage != null || pendingRouteId != null ||
+            pendingGrantedTargetIds.isNotEmpty() || pendingInitialTargetId != null ||
+            pendingSessionGrant != null
+
+    private fun restorePendingWorkflowState(savedInstanceState: Bundle?) {
+        val restoredScreen = try {
+            savedInstanceState?.getString(STATE_CURRENT_SCREEN)
+                ?.let { value -> AppScreen.entries.firstOrNull { it.name == value } }
+        } catch (_: Exception) {
+            null
+        } ?: AppScreen.GUIDANCE
+
+        var recordingStateInvalid = false
+        val restoredRecordingRouteName = try {
+            savedInstanceState?.getString(STATE_PENDING_RECORDING_ROUTE_NAME)
+        } catch (_: Exception) {
+            recordingStateInvalid = true
+            null
+        }
+        pendingRecordingRouteName = restoredRecordingRouteName?.takeIf { it.isNotBlank() }
+        if (restoredRecordingRouteName != null && pendingRecordingRouteName == null) {
+            recordingStateInvalid = true
+        }
+
+        var pendingStateInvalid = recordingStateInvalid
+        val restoredArrivalBehavior = try {
+            savedInstanceState?.getString(STATE_PENDING_ARRIVAL_BEHAVIOR)
+        } catch (_: Exception) {
+            pendingStateInvalid = true
+            null
+        }
+        if (restoredArrivalBehavior != null && pendingArrivalBehavior == null) {
+            pendingStateInvalid = true
+        }
+        val savedPendingState = savedInstanceState?.getBoolean(
+            STATE_PENDING_WORKFLOW_PRESENT,
+            false
+        ) == true
+        val hasPendingStateFields = savedInstanceState?.let { state ->
+            listOf(
+                STATE_PENDING_ROUTE_ID,
+                STATE_PENDING_GRANTED_TARGET_IDS,
+                STATE_PENDING_INITIAL_TARGET_ID,
+                STATE_PENDING_SESSION_GRANT_PRESENT,
+                STATE_PENDING_SESSION_GRANT_VISIT_GENERATION,
+                STATE_PENDING_SESSION_GRANT_ROUTE_ID,
+                STATE_PENDING_SESSION_GRANT_TARGET_IDS,
+                STATE_PENDING_SESSION_GRANT_INITIAL_TARGET_ID
+            ).any(state::containsKey)
+        } == true
+
+        if (savedPendingState || hasPendingStateFields) {
+            try {
+                pendingRouteId = savedInstanceState?.getString(STATE_PENDING_ROUTE_ID)
+                val restoredGrantedTargetIdList = savedInstanceState
+                    ?.getStringArrayList(STATE_PENDING_GRANTED_TARGET_IDS)
+                    ?: arrayListOf()
+                pendingGrantedTargetIds = restoredGrantedTargetIdList.toSet()
+                require(restoredGrantedTargetIdList.size == pendingGrantedTargetIds.size)
+                pendingInitialTargetId = savedInstanceState
+                    ?.getString(STATE_PENDING_INITIAL_TARGET_ID)
+
+                val hasGrant = savedInstanceState?.getBoolean(
+                    STATE_PENDING_SESSION_GRANT_PRESENT,
+                    false
+                ) == true
+                if (!hasGrant) {
+                    require(
+                        listOf(
+                            STATE_PENDING_SESSION_GRANT_VISIT_GENERATION,
+                            STATE_PENDING_SESSION_GRANT_ROUTE_ID,
+                            STATE_PENDING_SESSION_GRANT_TARGET_IDS,
+                            STATE_PENDING_SESSION_GRANT_INITIAL_TARGET_ID
+                        ).none { savedInstanceState?.containsKey(it) == true }
+                    )
+                }
+                pendingSessionGrant = if (hasGrant) {
+                    val state = checkNotNull(savedInstanceState)
+                    require(state.containsKey(STATE_PENDING_SESSION_GRANT_VISIT_GENERATION))
+                    val grant = SessionGrantFactory.create(
+                        visitGeneration = state.getLong(
+                            STATE_PENDING_SESSION_GRANT_VISIT_GENERATION,
+                            -1L
+                        ),
+                        routeId = requireNotNull(
+                            state.getString(STATE_PENDING_SESSION_GRANT_ROUTE_ID)
+                        ),
+                        configuredSelectedTargetIds = blockTargetStore.selectedTargetIds(),
+                        grantedTargetIds = requireNotNull(
+                            state.getStringArrayList(STATE_PENDING_SESSION_GRANT_TARGET_IDS)
+                        ).also { targetIds ->
+                            require(targetIds.size == targetIds.toSet().size)
+                        }.toSet(),
+                        initialTargetId = requireNotNull(
+                            state.getString(STATE_PENDING_SESSION_GRANT_INITIAL_TARGET_ID)
+                        )
+                    )
+                    require(pendingRouteId == grant.routeId)
+                    require(pendingGrantedTargetIds == grant.grantedTargetIds)
+                    require(pendingInitialTargetId == grant.initialTargetId)
+                    require(routeRepository.get(grant.routeId) != null)
+                    require(trackingManager.selectRoute(grant.routeId))
+                    require(trackingManager.hasValidSelectedRoute())
+                    grant
+                } else {
+                    require(pendingRouteId == null || routeRepository.get(pendingRouteId!!) != null)
+                    pendingRouteId?.let { routeId ->
+                        require(trackingManager.selectRoute(routeId))
+                        require(trackingManager.hasValidSelectedRoute())
+                    }
+                    require(pendingRouteId != null || pendingGrantedTargetIds.isEmpty())
+                    require(
+                        pendingGrantedTargetIds.all { targetId ->
+                            targetId in blockTargetStore.selectedTargetIds() &&
+                                blockTargetStore.get(targetId) != null
+                        }
+                    )
+                    require(
+                        pendingInitialTargetId == null ||
+                            pendingInitialTargetId in pendingGrantedTargetIds
+                    )
+                    null
+                }
+                require(!guidancePendingStart || pendingSessionGrant != null)
+                require(pendingPictureInPicturePackage == null || pendingSessionGrant != null)
+            } catch (_: Exception) {
+                pendingStateInvalid = true
+            }
+        } else if (guidancePendingStart || pendingPictureInPicturePackage != null) {
+            pendingStateInvalid = true
+        }
+
+        if (pendingStateInvalid) clearPendingViewingStart()
+        showScreen(
+            if (pendingRecordingRouteName != null) AppScreen.GUIDANCE else restoredScreen
+        )
     }
 
     private fun showProgressRewardDialog() {
@@ -731,6 +1260,7 @@ class MainActivity : Activity() {
                     BackgroundTrackingService.EXTRA_ARRIVAL_BEHAVIOR,
                     pendingArrivalBehavior!!.name
                 )
+                pendingSessionGrant?.let { grant -> SessionGrantExtras.putInto(this, grant) }
             }
         }
         try {
@@ -770,8 +1300,12 @@ class MainActivity : Activity() {
             recordButton.text = "記録終了"
             recordButton.isEnabled = true
         } else {
-            recordButton.text = if (markerRecognized) "記録開始" else "マーカーを映してください"
-            recordButton.isEnabled = markerRecognized
+            recordButton.text = when {
+                pendingRecordingRouteName == null -> "経路画面から登録"
+                markerRecognized -> "記録開始"
+                else -> "マーカーを映してください"
+            }
+            recordButton.isEnabled = markerRecognized && pendingRecordingRouteName != null
         }
 
         if (snapshot.guidance.state == GuidanceState.GUIDING) {
@@ -897,6 +1431,110 @@ class MainActivity : Activity() {
         bindTrackingService()
     }
 
+    private fun showDestinationSelectionDialog() {
+        val routes = try { routeRepository.list() } catch (_: Exception) { emptyList() }
+        if (routes.isEmpty()) {
+            clearPendingViewingStart()
+            guidanceHint.text = "登録された経路がありません"
+            return
+        }
+        val checked = routes.indexOfFirst { it.id == trackingManager.selectedRouteIdentifier }
+            .coerceAtLeast(0)
+        var chosen = checked
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("目的地を選択")
+            .setSingleChoiceItems(routes.map { it.name }.toTypedArray(), checked) { _, which ->
+                chosen = which
+            }
+            .setPositiveButton("次へ") { _, _ ->
+                val route = routes[chosen]
+                if (!trackingManager.selectRoute(route.id)) {
+                    clearPendingViewingStart()
+                    guidanceHint.text = "選択した経路を読み込めませんでした"
+                } else {
+                    pendingRouteId = route.id
+                    showGrantSelectionDialog()
+                }
+            }
+            .setNegativeButton("キャンセル") { _, _ -> clearPendingViewingStart() }
+            .create()
+        dialog.setOnCancelListener { clearPendingViewingStart() }
+        dialog.show()
+    }
+
+    private fun showGrantSelectionDialog() {
+        val targets = blockTargetStore.all().filter {
+            it.id in blockTargetStore.selectedTargetIds()
+        }
+        if (targets.isEmpty()) {
+            clearPendingViewingStart()
+            guidanceHint.text = "対象画面で対象を選択してください"
+            return
+        }
+        val checked = BooleanArray(targets.size) { true }
+        AlertDialog.Builder(this)
+            .setTitle("今回許可する対象")
+            .setMultiChoiceItems(
+                targets.map { it.displayName() }.toTypedArray(), checked
+            ) { _, which, isChecked -> checked[which] = isChecked }
+            .setPositiveButton("次へ") { _, _ ->
+                val selected = targets.filterIndexed { index, _ -> checked[index] }.map { it.id }.toSet()
+                if (selected.isEmpty()) {
+                    guidanceHint.text = "少なくとも1つ選択してください"
+                    showGrantSelectionDialog()
+                } else {
+                    pendingGrantedTargetIds = selected
+                    if (selected.size == 1) {
+                        finishTargetSelection(selected.single())
+                    } else {
+                        showInitialTargetSelectionDialog(targets.filter { it.id in selected })
+                    }
+                }
+            }
+            .setNegativeButton("キャンセル") { _, _ -> clearPendingViewingStart() }
+            .create()
+            .also { dialog -> dialog.setOnCancelListener { clearPendingViewingStart() } }
+            .show()
+    }
+
+    private fun showInitialTargetSelectionDialog(targets: List<BlockTarget>) {
+        var chosen = targets.indexOfFirst { it.id == blockTargetStore.initialTargetId() }
+            .coerceAtLeast(0)
+        val dialog = AlertDialog.Builder(this)
+            .setTitle("初回に起動する対象")
+            .setSingleChoiceItems(targets.map { it.displayName() }.toTypedArray(), chosen) { _, which ->
+                chosen = which
+            }
+            .setPositiveButton("開始") { _, _ -> finishTargetSelection(targets[chosen].id) }
+            .setNegativeButton("キャンセル") { _, _ -> clearPendingViewingStart() }
+            .create()
+        dialog.setOnCancelListener { clearPendingViewingStart() }
+        dialog.show()
+    }
+
+    private fun finishTargetSelection(initialTargetId: String) {
+        val routeId = pendingRouteId
+        if (routeId == null || pendingGrantedTargetIds.isEmpty()) {
+            clearPendingViewingStart()
+            return
+        }
+        pendingInitialTargetId = initialTargetId
+        pendingSessionGrant = try {
+            SessionGrantFactory.create(
+                visitGeneration = 0L,
+                routeId = routeId,
+                configuredSelectedTargetIds = blockTargetStore.selectedTargetIds(),
+                grantedTargetIds = pendingGrantedTargetIds,
+                initialTargetId = initialTargetId
+            )
+        } catch (_: IllegalArgumentException) {
+            clearPendingViewingStart()
+            guidanceHint.text = "対象の選択が無効です"
+            return
+        }
+        requestGuidanceStart()
+    }
+
     private fun showArrivalBehaviorDialog() {
         if (arrivalDialogShown || !viewingStartPending || pendingArrivalBehavior != null || isFinishing) return
         arrivalDialogShown = true
@@ -928,11 +1566,20 @@ class MainActivity : Activity() {
         usageSettingsOpened = false
         overlaySettingsOpened = false
         pendingPictureInPicturePackage = null
+        pendingRouteId = null
+        pendingGrantedTargetIds = emptySet()
+        pendingInitialTargetId = null
+        pendingSessionGrant = null
         arrivalDialogShown = false
         departureButton.text = "位置合わせして視聴開始"
     }
 
     private fun preferredViewingPackage(): String? {
+        pendingSessionGrant?.initialTargetId?.let { id ->
+            blockTargetStore.get(id)?.let { target ->
+                return resolveBlockTargetPackage(target)
+            }
+        }
         val youtubeUri = Uri.parse(YOUTUBE_HOME_URL)
         if (InterventionPreferences.viewingTarget(this) == ViewingTarget.YOUTUBE_APP) {
             val youtubeIntent = Intent(Intent.ACTION_VIEW, youtubeUri).apply {
@@ -1012,8 +1659,35 @@ class MainActivity : Activity() {
         }
     }
 
+    private fun launchBlockTarget(target: BlockTarget): ViewingLaunchResult? {
+        val intent = when (target) {
+            is BlockTarget.App -> packageManager.getLaunchIntentForPackage(target.packageName)
+                ?: run {
+                    guidanceHint.text = "${target.label}を起動できませんでした"
+                    return null
+                }
+            is BlockTarget.Domain -> Intent(Intent.ACTION_VIEW, Uri.parse(target.launchUrl)).apply {
+                addCategory(Intent.CATEGORY_BROWSABLE)
+            }
+        }
+        return tryStartViewingIntent(intent)?.let(::ViewingLaunchResult)
+    }
+
+    private fun resolveBlockTargetPackage(target: BlockTarget): String? {
+        val intent = when (target) {
+            is BlockTarget.App -> packageManager.getLaunchIntentForPackage(target.packageName)
+            is BlockTarget.Domain -> Intent(Intent.ACTION_VIEW, Uri.parse(target.launchUrl)).apply {
+                addCategory(Intent.CATEGORY_BROWSABLE)
+            }
+        } ?: return null
+        return packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)
+            ?.activityInfo?.packageName
+    }
+
     private fun tryStartViewingIntent(intent: Intent): String? {
         val targetPackage = intent.`package` ?: intent.component?.packageName
+            ?: packageManager.resolveActivity(intent, PackageManager.MATCH_DEFAULT_ONLY)
+                ?.activityInfo?.packageName
         if (targetPackage != null && !ensurePictureInPictureSetup(targetPackage)) return null
         return try {
             startActivity(intent)
@@ -1149,11 +1823,12 @@ class MainActivity : Activity() {
             viewingLaunchAttempts >= ViewingTargetLaunchPolicy.MAX_AUTOMATIC_ATTEMPTS
         ) return
         val service = boundTrackingService ?: return
-        val target = service.pendingViewingTargetIfReady() ?: return
+        val targetId = service.pendingViewingTargetIdIfReady() ?: return
         viewingLaunchAttempts++
-        val launchResult = launchViewingTarget(target)
+        val launchResult = blockTargetStore.get(targetId)?.let(::launchBlockTarget)
+            ?: service.pendingViewingTargetIfReady()?.let(::launchViewingTarget)
         if (launchResult != null) {
-            service.acknowledgeViewingTargetLaunched(target, launchResult.packageName)
+            service.acknowledgeViewingTargetIdLaunched(targetId, launchResult.packageName)
             guidanceHint.removeCallbacks(viewingLaunchRetry)
             viewingLaunchRetryScheduled = false
             viewingLaunchAttempts = 0
@@ -1185,7 +1860,26 @@ class MainActivity : Activity() {
         private const val STATE_OVERLAY_SETTINGS_OPENED = "overlay_settings_opened"
         private const val STATE_PENDING_PICTURE_IN_PICTURE_PACKAGE =
             "pending_picture_in_picture_package"
+        private const val STATE_PENDING_WORKFLOW_PRESENT = "pending_workflow_present"
+        private const val STATE_PENDING_ROUTE_ID = "pending_route_id"
+        private const val STATE_PENDING_GRANTED_TARGET_IDS = "pending_granted_target_ids"
+        private const val STATE_PENDING_INITIAL_TARGET_ID = "pending_initial_target_id"
+        private const val STATE_PENDING_SESSION_GRANT_PRESENT =
+            "pending_session_grant_present"
+        private const val STATE_PENDING_SESSION_GRANT_VISIT_GENERATION =
+            "pending_session_grant_visit_generation"
+        private const val STATE_PENDING_SESSION_GRANT_ROUTE_ID =
+            "pending_session_grant_route_id"
+        private const val STATE_PENDING_SESSION_GRANT_TARGET_IDS =
+            "pending_session_grant_target_ids"
+        private const val STATE_PENDING_SESSION_GRANT_INITIAL_TARGET_ID =
+            "pending_session_grant_initial_target_id"
+        private const val STATE_PENDING_RECORDING_ROUTE_NAME =
+            "pending_recording_route_name"
+        private const val STATE_CURRENT_SCREEN = "current_screen"
     }
 }
+
+private enum class AppScreen { GUIDANCE, ROUTES, TARGETS, HOME, SETTINGS }
 
 private data class ViewingLaunchResult(val packageName: String)

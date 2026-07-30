@@ -8,6 +8,18 @@ import org.junit.Test
 
 class PendingViewingLaunchTest {
     @Test
+    fun stableTargetIdIsHeldUntilTheActualPackageIsAcknowledged() {
+        val pending = PendingViewingLaunch()
+        pending.prepare("domain:example.com|subdomains=true|url=https://example.com")
+        pending.markReady()
+
+        assertEquals("domain:example.com|subdomains=true|url=https://example.com", pending.pendingTargetIdIfReady())
+        assertFalse(pending.completeTarget("app:other", "com.example.browser"))
+        assertTrue(pending.completeTarget("domain:example.com|subdomains=true|url=https://example.com", "com.example.browser"))
+        assertNull(pending.pendingTargetIdIfReady())
+    }
+
+    @Test
     fun waitsUntilServiceCameraIsReadyAndCompletesAfterSuccessfulLaunch() {
         val pending = PendingViewingLaunch()
         pending.prepare(ViewingTarget.BROWSER)
