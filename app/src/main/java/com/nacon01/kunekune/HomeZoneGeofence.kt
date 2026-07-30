@@ -179,6 +179,7 @@ class HomeZoneGeofenceManager(
             val observation = result.sample?.let { HomeZoneLocationClassifier.classify(config, it) }
                 ?: LocationObservation.UNKNOWN
             coordinator.observe(observation)
+            AppProtectionController.reconcile(appContext)
             onComplete(observation)
         }
     }
@@ -238,6 +239,10 @@ class HomeZoneGeofenceReceiver : BroadcastReceiver() {
         val transition = coordinator.observe(observation)
         if (observation == LocationObservation.OUTSIDE || transition.stopAll) {
             appContext.stopService(Intent(appContext, BackgroundTrackingService::class.java))
+            appContext.stopService(Intent(appContext, AppProtectionService::class.java))
+            AppProtectionController.publishStatus(appContext, AppProtectionStatus.OUTSIDE_OFF)
+        } else {
+            AppProtectionController.reconcile(appContext)
         }
         publishStateChanged(appContext, coordinator.snapshot())
     }
@@ -256,12 +261,16 @@ class HomeZoneGeofenceReceiver : BroadcastReceiver() {
 class HomeZoneBootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         if (intent?.action != Intent.ACTION_BOOT_COMPLETED) return
+        val appContext = context.applicationContext
+        AppProtectionController.reconcile(appContext)
         val pendingResult = goAsync()
         try {
-            HomeZoneGeofenceManager(context.applicationContext).registerOrUpdate {
+            HomeZoneGeofenceManager(appContext).registerOrUpdate {
+                AppProtectionController.reconcile(appContext)
                 pendingResult.finish()
             }
         } catch (_: Exception) {
+            AppProtectionController.reconcile(appContext)
             pendingResult.finish()
         }
     }

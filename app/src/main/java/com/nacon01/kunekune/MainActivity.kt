@@ -69,6 +69,7 @@ class MainActivity : Activity() {
     private lateinit var homeRadiusInput: EditText
     private lateinit var homeStatusText: TextView
     private lateinit var homeRegistrationText: TextView
+    private lateinit var homeProtectionStatusText: TextView
     private lateinit var homeWarningText: TextView
     private lateinit var trackingManager: ArTrackingManager
     private var latestGuidanceState = GuidanceState.INACTIVE
@@ -101,6 +102,8 @@ class MainActivity : Activity() {
     private var viewingLaunchAttempts = 0
     private var guidanceStopCompletionPosted = false
     private var currentScreen = AppScreen.GUIDANCE
+    private var currentAppProtectionStatus = AppProtectionStatus.OUTSIDE_OFF
+    private var appProtectionStatusReceived = false
     private var pendingRecordingRouteName: String? = null
     private var pendingRouteId: String? = null
     private var pendingGrantedTargetIds: Set<String> = emptySet()
@@ -117,6 +120,19 @@ class MainActivity : Activity() {
         override fun onReceive(context: Context, intent: Intent?) {
             if (intent?.action != HomeZoneGeofenceManager.ACTION_STATE_CHANGED) return
             runOnUiThread { onHomeZoneStateChanged() }
+        }
+    }
+    private val appProtectionStatusReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent?) {
+            if (intent?.action != AppProtectionController.ACTION_STATUS_CHANGED) return
+            val status = intent.getStringExtra(AppProtectionController.EXTRA_STATUS)
+                ?.let { value -> AppProtectionStatus.entries.firstOrNull { it.name == value } }
+                ?: return
+            runOnUiThread {
+                currentAppProtectionStatus = status
+                appProtectionStatusReceived = true
+                if (::homeProtectionStatusText.isInitialized) updateHomeZoneScreenStatus()
+            }
         }
     }
     private val arrivalMessageController = ArrivalMessageController()
@@ -504,6 +520,19 @@ class MainActivity : Activity() {
                 IntentFilter(HomeZoneGeofenceManager.ACTION_STATE_CHANGED)
             )
         }
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(
+                appProtectionStatusReceiver,
+                IntentFilter(AppProtectionController.ACTION_STATUS_CHANGED),
+                RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(
+                appProtectionStatusReceiver,
+                IntentFilter(AppProtectionController.ACTION_STATUS_CHANGED)
+            )
+        }
         updateInterventionSettingsControls()
         restorePendingWorkflowState(savedInstanceState)
 
@@ -669,6 +698,7 @@ class MainActivity : Activity() {
                         isChecked = target.id in selectedIds
                         setOnClickListener {
                             blockTargetStore.setSelected(target.id, isChecked)
+                            reconcileAppProtection()
                             rebuildTargetScreen()
                         }
                     }
@@ -690,6 +720,7 @@ class MainActivity : Activity() {
                                 .setMessage("${target.displayName()}を削除しますか？")
                                 .setPositiveButton("削除") { _, _ ->
                                     blockTargetStore.remove(target.id)
+                                    reconcileAppProtection()
                                     rebuildTargetScreen()
                                 }
                                 .setNegativeButton("キャンセル", null)
@@ -727,6 +758,7 @@ class MainActivity : Activity() {
                         info.loadLabel(packageManager).toString()
                     ))
                 }
+                reconcileAppProtection()
                 rebuildTargetScreen()
             }
             .setNegativeButton("キャンセル", null)
@@ -753,6 +785,7 @@ class MainActivity : Activity() {
                 try {
                     blockTargetStore.add(BlockTarget.domain(input.text.toString(), includeSubdomains.isChecked))
                     dialog.dismiss()
+                    reconcileAppProtection()
                     rebuildTargetScreen()
                 } catch (exception: IllegalArgumentException) {
                     input.error = exception.message ?: "入力を確認してください"
@@ -781,6 +814,7 @@ class MainActivity : Activity() {
         }
         homeStatusText = TextView(this@MainActivity)
         homeRegistrationText = TextView(this@MainActivity)
+        homeProtectionStatusText = TextView(this@MainActivity)
         homeWarningText = TextView(this@MainActivity).apply {
             setTextColor(Color.YELLOW)
         }
@@ -792,6 +826,7 @@ class MainActivity : Activity() {
                 text = "保存した自宅を基準に、マーカーと誘導を有効化します。"
             })
             addView(homeStatusText)
+            addView(homeProtectionStatusText)
             addView(homeRegistrationText)
             addView(homeLatitudeInput); addView(homeLongitudeInput); addView(homeRadiusInput)
             addView(homeWarningText)
@@ -802,6 +837,19 @@ class MainActivity : Activity() {
             addView(Button(this@MainActivity).apply {
                 text = "常に位置情報を許可"
                 setOnClickListener { requestBackgroundLocationPermission() }
+            })
+            addView(Button(this@MainActivity).apply {
+                text = "利用状況へのアクセスを設定"
+                setOnClickListener { startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS)) }
+            })
+            addView(Button(this@MainActivity).apply {
+                text = "他のアプリの上に表示を設定"
+                setOnClickListener {
+                    startActivity(Intent(
+                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                        Uri.parse("package:$packageName")
+                    ))
+                }
             })
             addView(Button(this@MainActivity).apply {
                 text = "現在地を自宅に設定"
@@ -915,6 +963,18 @@ class MainActivity : Activity() {
     private fun updateHomeZoneScreenStatus() {
         if (!::homeStatusText.isInitialized) return
         val snapshot = homeZoneCoordinator.reload()
+        if (!appProtectionStatusReceived) {
+            val store = blockTargetStore
+            val selectedIds = store.selectedTargetIds()
+            currentAppProtectionStatus = AppProtectionStatusPolicy.resolve(
+                snapshot = snapshot,
+                selectedAppTargetCount = store.all().count {
+                    it.id in selectedIds && it is BlockTarget.App
+                },
+                usageAccessGranted = UsageStatsForegroundReader.hasUsageAccess(this),
+                overlayPermissionGranted = Settings.canDrawOverlays(this)
+            )
+        }
         homeStatusText.text = when {
             homeZonePreferences.get() == null -> "保存済み自宅: なし"
             snapshot.lastKnownInside == true -> "実行状態: 自宅内（ロック中）"
@@ -922,6 +982,7 @@ class MainActivity : Activity() {
             snapshot.unknownWarning -> "実行状態: 不明（直前の判定を維持）"
             else -> "実行状態: 自宅外（OFF）"
         }
+        homeProtectionStatusText.text = "アプリ保護: ${currentAppProtectionStatus.displayName()}"
         homeRegistrationText.text = "ジオフェンス: ${when (homeZoneGeofenceManager.registrationStatus) {
             HomeZoneGeofenceRegistrationStatus.REGISTERED -> "登録済み"
             HomeZoneGeofenceRegistrationStatus.NOT_REGISTERED -> "未登録"
@@ -943,12 +1004,29 @@ class MainActivity : Activity() {
         is BlockTarget.Domain -> "$host${if (includeSubdomains) "（サブドメイン含む）" else ""}"
     }
 
+    private fun AppProtectionStatus.displayName(): String = when (this) {
+        AppProtectionStatus.ACTIVE -> "有効"
+        AppProtectionStatus.OUTSIDE_OFF -> "自宅外・OFF"
+        AppProtectionStatus.NO_SELECTED_APP_TARGET -> "選択中のアプリ対象なし"
+        AppProtectionStatus.USAGE_ACCESS_MISSING -> "利用状況へのアクセスが必要"
+        AppProtectionStatus.OVERLAY_PERMISSION_MISSING -> "表示権限が必要"
+        AppProtectionStatus.ERROR -> "エラー"
+    }
+
+    private fun reconcileAppProtection() {
+        val result = AppProtectionController.reconcile(this)
+        currentAppProtectionStatus = result.status
+        appProtectionStatusReceived = true
+        if (::homeProtectionStatusText.isInitialized) updateHomeZoneScreenStatus()
+    }
+
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
 
     override fun onResume() {
         super.onResume()
         activityResumed = true
         viewingLaunchAttempts = 0
+        reconcileAppProtection()
         if (homeZonePreferences.get() != null &&
             homeZoneGeofenceManager.hasRequiredLocationPermissions()
         ) {
@@ -1041,6 +1119,7 @@ class MainActivity : Activity() {
 
     override fun onDestroy() {
         try { unregisterReceiver(homeZoneStateReceiver) } catch (_: IllegalArgumentException) { }
+        try { unregisterReceiver(appProtectionStatusReceiver) } catch (_: IllegalArgumentException) { }
         if (::guidanceHint.isInitialized) guidanceHint.removeCallbacks(viewingLaunchRetry)
         if (::guidanceHint.isInitialized) guidanceHint.removeCallbacks(guidanceStopCompletion)
         resetArrivalMessage()
@@ -1213,6 +1292,7 @@ class MainActivity : Activity() {
     }
 
     private fun onHomeZoneStateChanged() {
+        reconcileAppProtection()
         val before = homeZoneCoordinator.snapshot()
         val snapshot = homeZoneCoordinator.reload()
         if (snapshot.lastKnownInside == false && before.lastKnownInside != false) {
@@ -1833,6 +1913,7 @@ class MainActivity : Activity() {
         }
         pendingInitialTargetId = initialTargetId
         pendingSessionGrant = grant
+        reconcileAppProtection()
         requestGuidanceStart()
     }
 
