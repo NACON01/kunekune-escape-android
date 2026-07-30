@@ -10,6 +10,8 @@ import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
 import android.widget.TextView
+import android.os.Handler
+import android.os.Looper
 
 enum class GuidanceOverlayState {
     NO_ROUTE,
@@ -23,16 +25,22 @@ enum class GuidanceOverlayState {
 
 data class GuidanceOverlaySnapshot(
     val state: GuidanceOverlayState,
-    val guidance: GuidanceSnapshot = GuidanceSnapshot(
-        state = GuidanceState.INACTIVE,
-        angleDifferenceDegrees = null,
-        remainingDistanceMeters = null,
-        progressPercent = null,
-        trackingLost = false
-    ),
+    val guidance: GuidanceSnapshot = defaultOverlayGuidance(state),
     val errorMessage: String? = null,
     val arcDistanceMeters: Float? = null,
     val fadeDensity: Float = 0f
+)
+
+private fun defaultOverlayGuidance(state: GuidanceOverlayState) = GuidanceSnapshot(
+    state = if (state == GuidanceOverlayState.ARRIVED) {
+        GuidanceState.ARRIVED
+    } else {
+        GuidanceState.INACTIVE
+    },
+    angleDifferenceDegrees = null,
+    remainingDistanceMeters = null,
+    progressPercent = null,
+    trackingLost = false
 )
 
 /** 矢印と暗転膜を一つの安全な TYPE_APPLICATION_OVERLAY window で管理する。 */
@@ -51,6 +59,20 @@ class GuidanceOverlay(context: Context) : FrameLayout(context.applicationContext
     private var fullBlackoutView: FrameLayout? = null
     private var fullBlackoutArrowView: GuidanceArrowView? = null
     private var fullBlackoutStatusView: TextView? = null
+    private val arrivalMessageController = ArrivalMessageController()
+    private val arrivalMessageHandler = Handler(Looper.getMainLooper())
+    private var pendingArrivalSnapshot: GuidanceOverlaySnapshot? = null
+    private val arrivalMessageRunnable = object : Runnable {
+        override fun run() {
+            val pending = pendingArrivalSnapshot ?: return
+            if (arrivalMessageController.onArrived()) {
+                scheduleArrivalMessage()
+                return
+            }
+            pendingArrivalSnapshot = null
+            renderNow(pending, arrivalMessageVisible = false)
+        }
+    }
 
     init {
         isClickable = false
@@ -82,28 +104,73 @@ class GuidanceOverlay(context: Context) : FrameLayout(context.applicationContext
     /** main thread から呼ぶ。完全暗転時は独立した不透明ウィンドウを重ねる。 */
     fun update(snapshot: GuidanceOverlaySnapshot) {
         if (!attached) return
-        updateFadeDensity(snapshot.fadeDensity, snapshot)
+        if (snapshot.state == GuidanceOverlayState.ARRIVED) {
+            pendingArrivalSnapshot = snapshot
+            val arrivalMessageVisible = arrivalMessageController.onArrived()
+            renderNow(snapshot, arrivalMessageVisible)
+            if (arrivalMessageVisible) {
+                scheduleArrivalMessage()
+            } else {
+                arrivalMessageHandler.removeCallbacks(arrivalMessageRunnable)
+            }
+            return
+        }
+        if (snapshot.state != GuidanceOverlayState.ARRIVED) {
+            arrivalMessageController.onNonArrived()
+            pendingArrivalSnapshot = null
+            arrivalMessageHandler.removeCallbacks(arrivalMessageRunnable)
+        }
+        renderNow(snapshot)
+    }
+
+    /** Clears the rendered arrival state and any scheduled message callback. */
+    fun reset() {
+        arrivalMessageHandler.removeCallbacks(arrivalMessageRunnable)
+        pendingArrivalSnapshot = null
+        arrivalMessageController.reset()
+    }
+
+    fun newSession() = reset()
+
+    private fun renderNow(
+        snapshot: GuidanceOverlaySnapshot,
+        arrivalMessageVisible: Boolean = true
+    ) {
+        updateFadeDensity(snapshot.fadeDensity, snapshot, arrivalMessageVisible)
         visibility = if (userHidden || snapshot.state == GuidanceOverlayState.WAITING_FOR_VIEWING) {
             GONE
         } else {
             VISIBLE
         }
-        renderHud(arrowView, statusView, snapshot)
+        renderHud(arrowView, statusView, snapshot, arrivalMessageVisible)
         val blackoutArrow = fullBlackoutArrowView
         val blackoutStatus = fullBlackoutStatusView
         if (blackoutArrow != null && blackoutStatus != null) {
-            renderHud(blackoutArrow, blackoutStatus, snapshot)
+            renderHud(blackoutArrow, blackoutStatus, snapshot, arrivalMessageVisible)
         }
+    }
+
+    private fun scheduleArrivalMessage() {
+        val deadline = arrivalMessageController.deadlineMonotonicMillis() ?: return
+        val remaining = (deadline - System.nanoTime() / 1_000_000L).coerceAtLeast(0L)
+        arrivalMessageHandler.removeCallbacks(arrivalMessageRunnable)
+        arrivalMessageHandler.postDelayed(arrivalMessageRunnable, remaining)
     }
 
     private fun renderHud(
         targetArrow: GuidanceArrowView,
         targetStatus: TextView,
-        snapshot: GuidanceOverlaySnapshot
+        snapshot: GuidanceOverlaySnapshot,
+        arrivalMessageVisible: Boolean
     ) {
         targetStatus.setTextColor(
             GuidanceColorPolicy.markerColor(snapshot.guidance.trackingLost)
         )
+        if (snapshot.state == GuidanceOverlayState.ARRIVED && !arrivalMessageVisible) {
+            targetArrow.update(inactiveGuidance())
+            targetStatus.text = ""
+            return
+        }
         when (snapshot.state) {
             GuidanceOverlayState.NO_ROUTE -> showInactive(
                 targetArrow,
@@ -128,7 +195,10 @@ class GuidanceOverlay(context: Context) : FrameLayout(context.applicationContext
                 targetArrow.update(snapshot.guidance)
                 targetStatus.text = "誘導中"
             }
-            GuidanceOverlayState.ARRIVED -> showInactive(targetArrow, targetStatus, "到着")
+            GuidanceOverlayState.ARRIVED -> {
+                targetArrow.update(snapshot.guidance.copy(state = GuidanceState.ARRIVED))
+                targetStatus.text = "到着"
+            }
             GuidanceOverlayState.ERROR -> showInactive(
                 targetArrow,
                 targetStatus,
@@ -145,6 +215,7 @@ class GuidanceOverlay(context: Context) : FrameLayout(context.applicationContext
     }
 
     fun remove() {
+        reset()
         if (!attached) return
         removeFullBlackout()
         try {
@@ -159,7 +230,8 @@ class GuidanceOverlay(context: Context) : FrameLayout(context.applicationContext
 
     private fun updateFadeDensity(
         requestedDensity: Float,
-        snapshot: GuidanceOverlaySnapshot
+        snapshot: GuidanceOverlaySnapshot,
+        arrivalMessageVisible: Boolean
     ) {
         val opacity = OverlayOpacityPolicy.forDesiredDensity(requestedDensity)
         scrimView.alpha = opacity.scrimAlpha
@@ -167,7 +239,7 @@ class GuidanceOverlay(context: Context) : FrameLayout(context.applicationContext
             setBackgroundColor(if (opacity.fullyOpaque) Color.BLACK else Color.TRANSPARENT)
         }
         if (opacity.fullyOpaque) {
-            ensureFullBlackout(snapshot)
+            ensureFullBlackout(snapshot, arrivalMessageVisible)
         } else {
             removeFullBlackout()
         }
@@ -195,7 +267,10 @@ class GuidanceOverlay(context: Context) : FrameLayout(context.applicationContext
      * It does not depend on the transparency or touch-through behavior of
      * the guidance window underneath it.
      */
-    private fun ensureFullBlackout(snapshot: GuidanceOverlaySnapshot) {
+    private fun ensureFullBlackout(
+        snapshot: GuidanceOverlaySnapshot,
+        arrivalMessageVisible: Boolean
+    ) {
         if (fullBlackoutView != null) return
         val blackout = FrameLayout(context.applicationContext).apply {
             setBackgroundColor(Color.BLACK)
@@ -206,7 +281,7 @@ class GuidanceOverlay(context: Context) : FrameLayout(context.applicationContext
         val blackoutArrow = GuidanceArrowView(context, compact = true)
         val blackoutStatus = createStatusView(context)
         addHud(blackout, blackoutArrow, blackoutStatus)
-        renderHud(blackoutArrow, blackoutStatus, snapshot)
+        renderHud(blackoutArrow, blackoutStatus, snapshot, arrivalMessageVisible)
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.MATCH_PARENT,

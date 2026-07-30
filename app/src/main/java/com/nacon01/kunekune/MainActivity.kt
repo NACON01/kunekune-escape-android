@@ -14,6 +14,8 @@ import android.graphics.Color
 import android.opengl.GLSurfaceView
 import android.os.Bundle
 import android.os.IBinder
+import android.os.Handler
+import android.os.Looper
 import android.util.Log
 import android.text.InputType
 import android.view.Gravity
@@ -77,6 +79,30 @@ class MainActivity : Activity() {
     private var viewingLaunchRetryScheduled = false
     private var viewingLaunchAttempts = 0
     private var guidanceStopCompletionPosted = false
+    private val arrivalMessageController = ArrivalMessageController()
+    private val arrivalMessageHandler = Handler(Looper.getMainLooper())
+    private var pendingArrivalSnapshot: TrackingSnapshot? = null
+    private val arrivalMessageRunnable = object : Runnable {
+        override fun run() {
+            if (arrivalMessageController.onArrived()) {
+                scheduleArrivalMessage()
+                return
+            }
+            val pending = pendingArrivalSnapshot
+            pendingArrivalSnapshot = null
+            if (::guidanceView.isInitialized) {
+                guidanceView.update(GuidanceSnapshot(GuidanceState.INACTIVE, null, null, null, false))
+            }
+            pending?.let { snapshot ->
+                if (snapshot.guidance.state == GuidanceState.ARRIVED) {
+                    updateControls(snapshot, arrivalMessageVisible = false)
+                }
+            }
+            if (BackgroundTrackingService.currentState == BackgroundTrackingState.ARRIVED) {
+                guidanceHint.text = ""
+            }
+        }
+    }
     private val viewingLaunchRetry = Runnable {
         viewingLaunchRetryScheduled = false
         if (activityResumed) launchPendingViewingTargetIfReady()
@@ -167,8 +193,10 @@ class MainActivity : Activity() {
             isEnabled = false
             setOnClickListener {
                 if (latestGuidanceState == GuidanceState.GUIDING) {
+                    resetArrivalMessage()
                     trackingManager.stopGuidance()
                 } else {
+                    resetArrivalMessage()
                     trackingManager.startGuidance()
                 }
             }
@@ -254,8 +282,26 @@ class MainActivity : Activity() {
         }
         trackingManager.onSnapshot = { snapshot ->
             debugHud.update(snapshot)
-            guidanceView.update(snapshot.guidance)
-            runOnUiThread { updateControls(snapshot) }
+            runOnUiThread {
+                if (snapshot.guidance.state == GuidanceState.ARRIVED) {
+                    pendingArrivalSnapshot = snapshot
+                    if (arrivalMessageController.onArrived()) {
+                        guidanceView.update(snapshot.guidance)
+                        updateControls(snapshot, arrivalMessageVisible = true)
+                        scheduleArrivalMessage()
+                    } else {
+                        guidanceView.update(snapshot.guidance.copy(state = GuidanceState.INACTIVE))
+                        updateControls(snapshot, arrivalMessageVisible = false)
+                        arrivalMessageHandler.removeCallbacks(arrivalMessageRunnable)
+                    }
+                } else {
+                    pendingArrivalSnapshot = null
+                    arrivalMessageController.onNonArrived()
+                    arrivalMessageHandler.removeCallbacks(arrivalMessageRunnable)
+                    guidanceView.update(snapshot.guidance)
+                    updateControls(snapshot, arrivalMessageVisible = false)
+                }
+            }
         }
 
         val buttonRow = LinearLayout(this).apply {
@@ -433,6 +479,7 @@ class MainActivity : Activity() {
     override fun onDestroy() {
         if (::guidanceHint.isInitialized) guidanceHint.removeCallbacks(viewingLaunchRetry)
         if (::guidanceHint.isInitialized) guidanceHint.removeCallbacks(guidanceStopCompletion)
+        resetArrivalMessage()
         guidanceStopCompletionPosted = false
         val guidanceLaunchStillPending = awaitingServiceStart ||
             boundTrackingService?.hasPendingViewingTarget() == true
@@ -707,7 +754,10 @@ class MainActivity : Activity() {
         }
     }
 
-    private fun updateControls(snapshot: TrackingSnapshot) {
+    private fun updateControls(
+        snapshot: TrackingSnapshot,
+        arrivalMessageVisible: Boolean = false
+    ) {
         latestGuidanceState = snapshot.guidance.state
         val markerRecognized = snapshot.marker.state == MarkerDetectionState.TRACKING
         latestMarkerRecognized = markerRecognized
@@ -739,7 +789,7 @@ class MainActivity : Activity() {
             guidanceHint.text = when {
                 !hasRoute -> "保存済み経路がありません"
                 !markerRecognized -> "マーカーを認識してください"
-                snapshot.guidance.state == GuidanceState.ARRIVED -> "到着しました"
+                snapshot.guidance.state == GuidanceState.ARRIVED && arrivalMessageVisible -> "到着しました"
                 else -> ""
             }
         }
@@ -1016,6 +1066,7 @@ class MainActivity : Activity() {
                 if (activeGuidanceService) launchPendingViewingTargetIfReady()
             }
             BackgroundTrackingState.GUIDING -> {
+                resetArrivalMessage()
                 if (activeGuidanceService) {
                     departureButton.text = "誘導停止"
                     guidanceHint.text = "位置合わせ完了"
@@ -1023,12 +1074,21 @@ class MainActivity : Activity() {
                 }
             }
             BackgroundTrackingState.TRACKING_LOST -> guidanceHint.text = "位置を復帰中"
-            BackgroundTrackingState.ARRIVED -> guidanceHint.text = "到着しました"
+            BackgroundTrackingState.ARRIVED -> {
+                if (arrivalMessageController.onArrived()) {
+                    guidanceHint.text = "到着しました"
+                    scheduleArrivalMessage()
+                } else {
+                    arrivalMessageHandler.removeCallbacks(arrivalMessageRunnable)
+                    guidanceHint.text = ""
+                }
+            }
             BackgroundTrackingState.FAILED -> {
                 pendingTerminalServiceError = boundTrackingService?.terminalFailureMessage()
                 guidanceHint.text = pendingTerminalServiceError ?: "誘導を安全停止しました"
             }
             BackgroundTrackingState.STOPPING -> {
+                resetArrivalMessage()
                 pendingTerminalServiceError = pendingTerminalServiceError ?:
                     boundTrackingService?.terminalFailureMessage()
                 awaitingServiceStart = false
@@ -1038,6 +1098,7 @@ class MainActivity : Activity() {
                 scheduleGuidanceStopCompletion()
             }
             BackgroundTrackingState.IDLE -> {
+                resetArrivalMessage()
                 if (awaitingServiceStart) return
                 scheduleGuidanceStopCompletion()
             }
@@ -1048,6 +1109,22 @@ class MainActivity : Activity() {
         if (guidanceStopCompletionPosted || !::guidanceHint.isInitialized) return
         guidanceStopCompletionPosted = true
         guidanceHint.post(guidanceStopCompletion)
+    }
+
+    private fun scheduleArrivalMessage() {
+        val deadline = arrivalMessageController.deadlineMonotonicMillis() ?: return
+        val remaining = (deadline - System.nanoTime() / 1_000_000L).coerceAtLeast(0L)
+        arrivalMessageHandler.removeCallbacks(arrivalMessageRunnable)
+        arrivalMessageHandler.postDelayed(arrivalMessageRunnable, remaining)
+    }
+
+    private fun resetArrivalMessage() {
+        arrivalMessageHandler.removeCallbacks(arrivalMessageRunnable)
+        pendingArrivalSnapshot = null
+        arrivalMessageController.reset()
+        if (::guidanceView.isInitialized) {
+            guidanceView.update(GuidanceSnapshot(GuidanceState.INACTIVE, null, null, null, false))
+        }
     }
 
     private fun completeGuidanceStop() {
