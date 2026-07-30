@@ -5,6 +5,8 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.ComponentName
 import android.content.Context
+import android.content.BroadcastReceiver
+import android.content.IntentFilter
 import android.content.pm.PackageManager
 import android.content.Intent
 import android.content.ServiceConnection
@@ -62,6 +64,12 @@ class MainActivity : Activity() {
     private lateinit var guidanceControls: LinearLayout
     private lateinit var bottomNavigation: LinearLayout
     private lateinit var settingsScreenView: View
+    private lateinit var homeLatitudeInput: EditText
+    private lateinit var homeLongitudeInput: EditText
+    private lateinit var homeRadiusInput: EditText
+    private lateinit var homeStatusText: TextView
+    private lateinit var homeRegistrationText: TextView
+    private lateinit var homeWarningText: TextView
     private lateinit var trackingManager: ArTrackingManager
     private var latestGuidanceState = GuidanceState.INACTIVE
     private var installRequested = false
@@ -74,6 +82,11 @@ class MainActivity : Activity() {
     private var pendingPictureInPicturePackage: String? = null
     private var pendingArrivalBehavior: ArrivalBehavior? = null
     private var arrivalDialogShown = false
+    private var arrivalBehaviorDialog: AlertDialog? = null
+    private var destinationSelectionDialog: AlertDialog? = null
+    private var grantSelectionDialog: AlertDialog? = null
+    private var initialTargetSelectionDialog: AlertDialog? = null
+    private var clearingPendingViewingStart = false
     private var activityResumed = false
     private var glResumed = false
     private var serviceBound = false
@@ -96,6 +109,16 @@ class MainActivity : Activity() {
     private val routeRepository by lazy { RouteRepository(this) }
     private val blockTargetStore by lazy { BlockTargetStore(this) }
     private val homeZonePreferences by lazy { HomeZonePreferences(this) }
+    private val homeZoneCoordinator by lazy { HomeZoneRuntimeCoordinator(this) }
+    private val homeZoneGeofenceManager by lazy {
+        HomeZoneGeofenceManager(this, homeZonePreferences, homeZoneCoordinator)
+    }
+    private val homeZoneStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent?) {
+            if (intent?.action != HomeZoneGeofenceManager.ACTION_STATE_CHANGED) return
+            runOnUiThread { onHomeZoneStateChanged() }
+        }
+    }
     private val arrivalMessageController = ArrivalMessageController()
     private val arrivalMessageHandler = Handler(Looper.getMainLooper())
     private var pendingArrivalSnapshot: TrackingSnapshot? = null
@@ -212,6 +235,9 @@ class MainActivity : Activity() {
                             rebuildRouteScreen()
                         }
                     }
+                } else if (pendingRecordingRouteName != null && !isHomeZoneReady()) {
+                    guidanceHint.text = "自宅内を確認できないため、マーカー記録はOFFです"
+                    showScreen(AppScreen.HOME)
                 } else if (pendingRecordingRouteName != null && trackingManager.startRecording()) {
                     text = "記録終了"
                     isEnabled = true
@@ -228,6 +254,14 @@ class MainActivity : Activity() {
                     resetArrivalMessage()
                     trackingManager.stopGuidance()
                 } else {
+                    homeZoneCoordinator.reload()
+                    if (homeZonePreferences.get() == null ||
+                        !homeZoneGeofenceManager.hasRequiredLocationPermissions() ||
+                        homeZoneCoordinator.snapshot().lastKnownInside != true
+                    ) {
+                        guidanceHint.text = "自宅内を確認できないため、誘導はOFFです"
+                        return@setOnClickListener
+                    }
                     resetArrivalMessage()
                     trackingManager.startGuidance()
                 }
@@ -457,6 +491,19 @@ class MainActivity : Activity() {
             ))
         }
         setContentView(root)
+        if (android.os.Build.VERSION.SDK_INT >= 33) {
+            registerReceiver(
+                homeZoneStateReceiver,
+                IntentFilter(HomeZoneGeofenceManager.ACTION_STATE_CHANGED),
+                RECEIVER_NOT_EXPORTED
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            registerReceiver(
+                homeZoneStateReceiver,
+                IntentFilter(HomeZoneGeofenceManager.ACTION_STATE_CHANGED)
+            )
+        }
         updateInterventionSettingsControls()
         restorePendingWorkflowState(savedInstanceState)
 
@@ -717,50 +764,178 @@ class MainActivity : Activity() {
 
     private fun buildHomeScreen(): View = ScrollView(this).apply {
         val config = homeZonePreferences.get()
-        val latitude = EditText(this@MainActivity).apply {
+        homeLatitudeInput = EditText(this@MainActivity).apply {
             hint = "緯度"
             inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED or InputType.TYPE_NUMBER_FLAG_DECIMAL
             config?.latitude?.let { setText(it.toString()) }
         }
-        val longitude = EditText(this@MainActivity).apply {
+        homeLongitudeInput = EditText(this@MainActivity).apply {
             hint = "経度"
             inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_SIGNED or InputType.TYPE_NUMBER_FLAG_DECIMAL
             config?.longitude?.let { setText(it.toString()) }
         }
-        val radius = EditText(this@MainActivity).apply {
+        homeRadiusInput = EditText(this@MainActivity).apply {
             hint = "半径（m）"
             inputType = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL
             config?.radiusMeters?.let { setText(it.toString()) }
         }
-        val warning = TextView(this@MainActivity).apply {
+        homeStatusText = TextView(this@MainActivity)
+        homeRegistrationText = TextView(this@MainActivity)
+        homeWarningText = TextView(this@MainActivity).apply {
             setTextColor(Color.YELLOW)
-            text = if (config?.hasSmallRadiusWarning == true) "半径が100m未満です" else ""
         }
         addView(LinearLayout(this@MainActivity).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(dp(12), dp(18), dp(12), dp(96))
             addView(TextView(this@MainActivity).apply { text = "自宅"; textSize = 22f })
-            addView(TextView(this@MainActivity).apply { text = "現在地は取得せず、入力値だけを保存します。" })
-            addView(latitude); addView(longitude); addView(radius); addView(warning)
+            addView(TextView(this@MainActivity).apply {
+                text = "保存した自宅を基準に、マーカーと誘導を有効化します。"
+            })
+            addView(homeStatusText)
+            addView(homeRegistrationText)
+            addView(homeLatitudeInput); addView(homeLongitudeInput); addView(homeRadiusInput)
+            addView(homeWarningText)
+            addView(Button(this@MainActivity).apply {
+                text = "正確な位置情報を許可"
+                setOnClickListener { requestForegroundLocationPermission() }
+            })
+            addView(Button(this@MainActivity).apply {
+                text = "常に位置情報を許可"
+                setOnClickListener { requestBackgroundLocationPermission() }
+            })
+            addView(Button(this@MainActivity).apply {
+                text = "現在地を自宅に設定"
+                setOnClickListener {
+                    if (!homeZoneGeofenceManager.hasForegroundPrecisePermission()) {
+                        requestForegroundLocationPermission()
+                        return@setOnClickListener
+                    }
+                    homeZoneGeofenceManager.requestCurrentLocation { result ->
+                        val sample = result.sample
+                        if (sample == null) {
+                            homeWarningText.text = result.errorMessage ?: "現在地を取得できませんでした。"
+                            homeWarningText.setTextColor(Color.RED)
+                        } else {
+                            try {
+                                saveHomeZoneConfig(
+                                    HomeZoneConfig(
+                                        latitude = sample.latitude,
+                                        longitude = sample.longitude,
+                                        radiusMeters = homeRadiusInput.text.toString()
+                                            .trim()
+                                            .ifEmpty { "100" }
+                                            .toDouble()
+                                    )
+                                )
+                            } catch (exception: Exception) {
+                                homeWarningText.text = exception.message ?: "入力を確認してください"
+                                homeWarningText.setTextColor(Color.RED)
+                            }
+                        }
+                    }
+                }
+            })
             addView(Button(this@MainActivity).apply {
                 text = "保存"
                 setOnClickListener {
                     try {
-                        val saved = HomeZoneConfig(
-                            latitude.text.toString().trim().toDouble(),
-                            longitude.text.toString().trim().toDouble(),
-                            radius.text.toString().trim().toDouble()
-                        )
-                        homeZonePreferences.save(saved)
-                        warning.setTextColor(Color.YELLOW)
-                        warning.text = if (saved.hasSmallRadiusWarning) "半径が100m未満です" else "保存しました"
+                        saveHomeZoneConfig(HomeZoneConfig(
+                            homeLatitudeInput.text.toString().trim().toDouble(),
+                            homeLongitudeInput.text.toString().trim().toDouble(),
+                            homeRadiusInput.text.toString().trim().ifEmpty { "100" }.toDouble()
+                        ))
                     } catch (exception: Exception) {
-                        warning.text = exception.message ?: "入力を確認してください"
-                        warning.setTextColor(Color.RED)
+                        homeWarningText.text = exception.message ?: "入力を確認してください"
+                        homeWarningText.setTextColor(Color.RED)
                     }
                 }
             })
         })
+        updateHomeZoneScreenStatus()
+    }
+
+    private fun saveHomeZoneConfig(config: HomeZoneConfig) {
+        homeZonePreferences.save(config)
+        homeLatitudeInput.setText(config.latitude.toString())
+        homeLongitudeInput.setText(config.longitude.toString())
+        homeRadiusInput.setText(config.radiusMeters.toString())
+        homeWarningText.setTextColor(Color.YELLOW)
+        homeWarningText.text = if (config.hasSmallRadiusWarning) {
+            "半径が100m未満です。一般的な精度では100m以上が推奨されます。"
+        } else "保存しました。ジオフェンスを登録中…"
+        homeZoneGeofenceManager.registerOrUpdate { result ->
+            updateHomeZoneScreenStatus()
+            homeWarningText.text = result.message
+            homeWarningText.setTextColor(if (result.success) Color.YELLOW else Color.RED)
+        }
+    }
+
+    private fun requestForegroundLocationPermission() {
+        if (homeZoneGeofenceManager.hasForegroundPrecisePermission()) {
+            requestBackgroundLocationPermission()
+            return
+        }
+        requestPermissions(
+            arrayOf(
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            ),
+            HOME_FOREGROUND_LOCATION_PERMISSION_REQUEST
+        )
+    }
+
+    private fun requestBackgroundLocationPermission() {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.Q ||
+            checkSelfPermission(Manifest.permission.ACCESS_BACKGROUND_LOCATION) ==
+                PackageManager.PERMISSION_GRANTED
+        ) {
+            updateHomeZoneScreenStatus()
+            return
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+            AlertDialog.Builder(this)
+                .setTitle("常に位置情報を許可")
+                .setMessage("自宅の出入りを画面外でも判定するため、アプリの位置情報設定で「常に許可」を選択してください。")
+                .setPositiveButton("設定を開く") { _, _ ->
+                    startActivity(Intent(
+                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:$packageName")
+                    ))
+                }
+                .setNegativeButton("キャンセル", null)
+                .show()
+        } else {
+            requestPermissions(
+                arrayOf(Manifest.permission.ACCESS_BACKGROUND_LOCATION),
+                HOME_BACKGROUND_LOCATION_PERMISSION_REQUEST
+            )
+        }
+    }
+
+    private fun updateHomeZoneScreenStatus() {
+        if (!::homeStatusText.isInitialized) return
+        val snapshot = homeZoneCoordinator.reload()
+        homeStatusText.text = when {
+            homeZonePreferences.get() == null -> "保存済み自宅: なし"
+            snapshot.lastKnownInside == true -> "実行状態: 自宅内（ロック中）"
+            snapshot.unknownWarning && snapshot.lastKnownInside == null -> "実行状態: 不明（履歴なし・OFF）"
+            snapshot.unknownWarning -> "実行状態: 不明（直前の判定を維持）"
+            else -> "実行状態: 自宅外（OFF）"
+        }
+        homeRegistrationText.text = "ジオフェンス: ${when (homeZoneGeofenceManager.registrationStatus) {
+            HomeZoneGeofenceRegistrationStatus.REGISTERED -> "登録済み"
+            HomeZoneGeofenceRegistrationStatus.NOT_REGISTERED -> "未登録"
+            HomeZoneGeofenceRegistrationStatus.FAILED -> "登録失敗"
+            HomeZoneGeofenceRegistrationStatus.UNKNOWN -> "確認中"
+        }}"
+        val config = homeZonePreferences.get()
+        homeWarningText.text = when {
+            config?.hasSmallRadiusWarning == true -> "半径が100m未満です。一般的な精度では100m以上が推奨されます。"
+            !homeZoneGeofenceManager.hasForegroundPrecisePermission() -> "正確な位置情報の権限が必要です。"
+            !homeZoneGeofenceManager.hasRequiredLocationPermissions() -> "バックグラウンド位置情報（常に許可）が必要です。"
+            else -> ""
+        }
+        homeWarningText.setTextColor(Color.YELLOW)
     }
 
     private fun BlockTarget.displayName(): String = when (this) {
@@ -774,6 +949,15 @@ class MainActivity : Activity() {
         super.onResume()
         activityResumed = true
         viewingLaunchAttempts = 0
+        if (homeZonePreferences.get() != null &&
+            homeZoneGeofenceManager.hasRequiredLocationPermissions()
+        ) {
+            homeZoneGeofenceManager.registerOrUpdate {
+                if (::homeStatusText.isInitialized) updateHomeZoneScreenStatus()
+            }
+        } else if (::homeStatusText.isInitialized && currentScreen == AppScreen.HOME) {
+            updateHomeZoneScreenStatus()
+        }
         pendingPictureInPicturePackage?.let { packageName ->
             InterventionPreferences.markPictureInPictureSetupGuidanceShown(this, packageName)
             pendingPictureInPicturePackage = null
@@ -856,6 +1040,7 @@ class MainActivity : Activity() {
     }
 
     override fun onDestroy() {
+        try { unregisterReceiver(homeZoneStateReceiver) } catch (_: IllegalArgumentException) { }
         if (::guidanceHint.isInitialized) guidanceHint.removeCallbacks(viewingLaunchRetry)
         if (::guidanceHint.isInitialized) guidanceHint.removeCallbacks(guidanceStopCompletion)
         resetArrivalMessage()
@@ -888,6 +1073,17 @@ class MainActivity : Activity() {
             continueBackgroundTrackingStart()
             return
         }
+        if (requestCode == HOME_FOREGROUND_LOCATION_PERMISSION_REQUEST ||
+            requestCode == HOME_BACKGROUND_LOCATION_PERMISSION_REQUEST
+        ) {
+            if (requestCode == HOME_FOREGROUND_LOCATION_PERMISSION_REQUEST &&
+                grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED
+            ) {
+                requestBackgroundLocationPermission()
+            }
+            updateHomeZoneScreenStatus()
+            return
+        }
         if (requestCode == CAMERA_PERMISSION_REQUEST) {
             awaitingCamera = false
             if (guidancePendingStart) {
@@ -916,6 +1112,23 @@ class MainActivity : Activity() {
             requestBackgroundServiceStop()
             return
         }
+        if (homeZonePreferences.get() == null) {
+            guidanceHint.text = "自宅を保存してから開始してください"
+            showScreen(AppScreen.HOME)
+            return
+        }
+        if (!homeZoneGeofenceManager.hasRequiredLocationPermissions()) {
+            guidanceHint.text = "正確な位置情報と常に許可の権限が必要です"
+            showScreen(AppScreen.HOME)
+            return
+        }
+        homeZoneCoordinator.reload()
+        if (homeZoneCoordinator.snapshot().lastKnownInside != true) {
+            guidanceHint.text = if (homeZoneCoordinator.snapshot().unknownWarning) {
+                "自宅内か確認できないため、誘導はOFFです"
+            } else "自宅外のため、誘導はOFFです"
+            return
+        }
         if (!hasValidSavedRoute()) {
             guidanceHint.text = "有効な保存済み経路がないため開始できません"
             return
@@ -930,11 +1143,26 @@ class MainActivity : Activity() {
         pendingPictureInPicturePackage = null
         viewingStartPending = true
         pendingArrivalBehavior = null
+        val awaiting = homeZoneCoordinator.awaitMarker()
+        if (!awaiting.accepted) {
+            clearPendingViewingStart()
+            guidanceHint.text = awaiting.reason ?: "マーカー待機を開始できませんでした"
+            return
+        }
         departureButton.text = "マーカー待機中"
         showArrivalBehaviorDialog()
     }
 
     private fun requestGuidanceStart() {
+        homeZoneCoordinator.reload()
+        if (homeZonePreferences.get() == null ||
+            !homeZoneGeofenceManager.hasRequiredLocationPermissions() ||
+            homeZoneCoordinator.snapshot().lastKnownInside != true
+        ) {
+            clearPendingViewingStart()
+            guidanceHint.text = "自宅内を確認できないため、誘導はOFFです"
+            return
+        }
         if (!hasValidSavedRoute()) {
             guidanceHint.text = "有効な保存済み経路がないため離脱できません"
             return
@@ -970,11 +1198,37 @@ class MainActivity : Activity() {
         return trackingManager.hasValidSelectedRoute()
     }
 
+    private fun isHomeZoneReady(): Boolean {
+        homeZoneCoordinator.reload()
+        return homeZonePreferences.get() != null &&
+            homeZoneGeofenceManager.hasRequiredLocationPermissions() &&
+            homeZoneCoordinator.snapshot().lastKnownInside == true
+    }
+
     private fun hasValidTargetSelection(): Boolean {
         val selected = blockTargetStore.selectedTargetIds()
         val initial = blockTargetStore.initialTargetId()
         return selected.isNotEmpty() && initial != null && initial in selected &&
             selected.all { blockTargetStore.get(it) != null }
+    }
+
+    private fun onHomeZoneStateChanged() {
+        val before = homeZoneCoordinator.snapshot()
+        val snapshot = homeZoneCoordinator.reload()
+        if (snapshot.lastKnownInside == false && before.lastKnownInside != false) {
+            clearPendingViewingStart()
+            if (::trackingManager.isInitialized) {
+                trackingManager.stopGuidance()
+                if (trackingManager.isRecording) trackingManager.stopRecording()
+            }
+            if (BackgroundTrackingService.blocksPhase1Camera()) {
+                stopService(Intent(this, BackgroundTrackingService::class.java))
+                activeGuidanceService = false
+            }
+            if (::guidanceHint.isInitialized) guidanceHint.text = "自宅外・OFF（コンテンツは制限されません）"
+            if (::departureButton.isInitialized) departureButton.text = "位置合わせして視聴開始"
+        }
+        if (currentScreen == AppScreen.HOME) updateHomeZoneScreenStatus()
     }
 
     private fun updateInterventionSettingsControls() {
@@ -1277,6 +1531,16 @@ class MainActivity : Activity() {
             return
         }
         activeGuidanceService = startGuidance
+        if (startGuidance) {
+            val started = pendingSessionGrant?.let(homeZoneCoordinator::guidanceStarted)
+            if (started == null || !started.accepted) {
+                clearPendingViewingStart()
+                guidanceHint.text = started?.reason ?: "誘導状態を開始できませんでした"
+                stopService(Intent(this, BackgroundTrackingService::class.java))
+                activeGuidanceService = false
+                return
+            }
+        }
         bindTrackingService()
         if (startGuidance) {
             departureButton.text = "マーカー確認中"
@@ -1292,6 +1556,12 @@ class MainActivity : Activity() {
         val markerRecognized = snapshot.marker.state == MarkerDetectionState.TRACKING
         latestMarkerRecognized = markerRecognized
         if (viewingStartPending && markerRecognized && !BackgroundTrackingService.blocksPhase1Camera()) {
+            val found = homeZoneCoordinator.markerFound()
+            if (!found.accepted) {
+                clearPendingViewingStart()
+                guidanceHint.text = found.reason ?: "マーカー待機を解除しました"
+                return
+            }
             viewingStartPending = false
             requestGuidanceStart()
             return
@@ -1452,13 +1722,25 @@ class MainActivity : Activity() {
                     clearPendingViewingStart()
                     guidanceHint.text = "選択した経路を読み込めませんでした"
                 } else {
-                    pendingRouteId = route.id
-                    showGrantSelectionDialog()
+                    val selected = homeZoneCoordinator.destinationSelected()
+                    if (!selected.accepted) {
+                        clearPendingViewingStart()
+                        guidanceHint.text = selected.reason ?: "目的地選択を開始できませんでした"
+                    } else {
+                        pendingRouteId = route.id
+                        showGrantSelectionDialog()
+                    }
                 }
             }
             .setNegativeButton("キャンセル") { _, _ -> clearPendingViewingStart() }
             .create()
-        dialog.setOnCancelListener { clearPendingViewingStart() }
+        destinationSelectionDialog = dialog
+        dialog.setOnDismissListener {
+            if (destinationSelectionDialog === dialog) destinationSelectionDialog = null
+        }
+        dialog.setOnCancelListener {
+            if (!clearingPendingViewingStart) clearPendingViewingStart()
+        }
         dialog.show()
     }
 
@@ -1472,7 +1754,7 @@ class MainActivity : Activity() {
             return
         }
         val checked = BooleanArray(targets.size) { true }
-        AlertDialog.Builder(this)
+        val dialog = AlertDialog.Builder(this)
             .setTitle("今回許可する対象")
             .setMultiChoiceItems(
                 targets.map { it.displayName() }.toTypedArray(), checked
@@ -1493,8 +1775,14 @@ class MainActivity : Activity() {
             }
             .setNegativeButton("キャンセル") { _, _ -> clearPendingViewingStart() }
             .create()
-            .also { dialog -> dialog.setOnCancelListener { clearPendingViewingStart() } }
-            .show()
+        grantSelectionDialog = dialog
+        dialog.setOnDismissListener {
+            if (grantSelectionDialog === dialog) grantSelectionDialog = null
+        }
+        dialog.setOnCancelListener {
+            if (!clearingPendingViewingStart) clearPendingViewingStart()
+        }
+        dialog.show()
     }
 
     private fun showInitialTargetSelectionDialog(targets: List<BlockTarget>) {
@@ -1508,7 +1796,13 @@ class MainActivity : Activity() {
             .setPositiveButton("開始") { _, _ -> finishTargetSelection(targets[chosen].id) }
             .setNegativeButton("キャンセル") { _, _ -> clearPendingViewingStart() }
             .create()
-        dialog.setOnCancelListener { clearPendingViewingStart() }
+        initialTargetSelectionDialog = dialog
+        dialog.setOnDismissListener {
+            if (initialTargetSelectionDialog === dialog) initialTargetSelectionDialog = null
+        }
+        dialog.setOnCancelListener {
+            if (!clearingPendingViewingStart) clearPendingViewingStart()
+        }
         dialog.show()
     }
 
@@ -1518,10 +1812,9 @@ class MainActivity : Activity() {
             clearPendingViewingStart()
             return
         }
-        pendingInitialTargetId = initialTargetId
-        pendingSessionGrant = try {
+        val grant = try {
             SessionGrantFactory.create(
-                visitGeneration = 0L,
+                visitGeneration = homeZoneCoordinator.snapshot().visitGeneration,
                 routeId = routeId,
                 configuredSelectedTargetIds = blockTargetStore.selectedTargetIds(),
                 grantedTargetIds = pendingGrantedTargetIds,
@@ -1532,13 +1825,21 @@ class MainActivity : Activity() {
             guidanceHint.text = "対象の選択が無効です"
             return
         }
+        val selected = homeZoneCoordinator.selectTargets(grant)
+        if (!selected.accepted) {
+            clearPendingViewingStart()
+            guidanceHint.text = selected.reason ?: "対象選択を開始できませんでした"
+            return
+        }
+        pendingInitialTargetId = initialTargetId
+        pendingSessionGrant = grant
         requestGuidanceStart()
     }
 
     private fun showArrivalBehaviorDialog() {
         if (arrivalDialogShown || !viewingStartPending || pendingArrivalBehavior != null || isFinishing) return
         arrivalDialogShown = true
-        AlertDialog.Builder(this)
+        val dialog = AlertDialog.Builder(this)
             .setTitle("到着時の動作")
             .setItems(
                 arrayOf(ArrivalBehavior.RELEASE.displayName, ArrivalBehavior.FADE_OUT.displayName)
@@ -1554,24 +1855,40 @@ class MainActivity : Activity() {
             }
             .setOnCancelListener {
                 arrivalDialogShown = false
-                clearPendingViewingStart()
+                if (!clearingPendingViewingStart) clearPendingViewingStart()
             }
-            .show()
+            .create()
+        arrivalBehaviorDialog = dialog
+        dialog.setOnDismissListener {
+            arrivalDialogShown = false
+            if (arrivalBehaviorDialog === dialog) arrivalBehaviorDialog = null
+        }
+        dialog.show()
     }
 
     private fun clearPendingViewingStart() {
-        viewingStartPending = false
-        guidancePendingStart = false
-        pendingArrivalBehavior = null
-        usageSettingsOpened = false
-        overlaySettingsOpened = false
-        pendingPictureInPicturePackage = null
-        pendingRouteId = null
-        pendingGrantedTargetIds = emptySet()
-        pendingInitialTargetId = null
-        pendingSessionGrant = null
-        arrivalDialogShown = false
-        departureButton.text = "位置合わせして視聴開始"
+        clearingPendingViewingStart = true
+        try {
+            homeZoneCoordinator.resetWorkflow()
+            viewingStartPending = false
+            guidancePendingStart = false
+            pendingArrivalBehavior = null
+            usageSettingsOpened = false
+            overlaySettingsOpened = false
+            pendingPictureInPicturePackage = null
+            pendingRouteId = null
+            pendingGrantedTargetIds = emptySet()
+            pendingInitialTargetId = null
+            pendingSessionGrant = null
+            arrivalDialogShown = false
+            arrivalBehaviorDialog?.dismiss()
+            destinationSelectionDialog?.dismiss()
+            grantSelectionDialog?.dismiss()
+            initialTargetSelectionDialog?.dismiss()
+            departureButton.text = "位置合わせして視聴開始"
+        } finally {
+            clearingPendingViewingStart = false
+        }
     }
 
     private fun preferredViewingPackage(): String? {
@@ -1846,6 +2163,8 @@ class MainActivity : Activity() {
     companion object {
         private const val CAMERA_PERMISSION_REQUEST = 1001
         private const val NOTIFICATION_PERMISSION_REQUEST = 1002
+        private const val HOME_FOREGROUND_LOCATION_PERMISSION_REQUEST = 1003
+        private const val HOME_BACKGROUND_LOCATION_PERMISSION_REQUEST = 1004
         private const val SERVICE_STOP_POLL_INTERVAL_MILLIS = 50L
         private const val YOUTUBE_PACKAGE = "com.google.android.youtube"
         private const val YOUTUBE_HOME_URL = "https://www.youtube.com/"

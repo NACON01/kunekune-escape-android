@@ -22,10 +22,12 @@ android {
 
     kotlinOptions {
         jvmTarget = "17"
+        freeCompilerArgs += "-Xskip-metadata-version-check"
     }
 
     dependencies {
         implementation("com.google.ar:core:1.54.0")
+        implementation("com.google.android.gms:play-services-location:21.4.0")
         testImplementation("junit:junit:4.13.2")
         testImplementation("org.json:json:20240303")
     }

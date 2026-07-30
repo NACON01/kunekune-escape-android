@@ -48,6 +48,7 @@ enum class LocationObservation {
 
 sealed interface HomeZoneEvent {
     data class Location(val observation: LocationObservation) : HomeZoneEvent
+    data object WorkflowReset : HomeZoneEvent
     data object AwaitingMarker : HomeZoneEvent
     data object MarkerFound : HomeZoneEvent
     data object DestinationSelected : HomeZoneEvent
@@ -125,10 +126,24 @@ class HomeZoneStateMachine(
     fun guidanceStarted(grant: SessionGrant): HomeZoneTransition =
         transition(HomeZoneEvent.GuidanceStarted(grant))
 
+    fun resetWorkflow(): HomeZoneTransition = transition(HomeZoneEvent.WorkflowReset)
+
     companion object {
         fun reduce(snapshot: HomeZoneSnapshot, event: HomeZoneEvent): HomeZoneTransition {
             val next = when (event) {
                 is HomeZoneEvent.Location -> reduceLocation(snapshot, event.observation)
+                HomeZoneEvent.WorkflowReset -> HomeZoneTransition(
+                    accepted = true,
+                    snapshot = snapshot.copy(
+                        state = if (snapshot.lastKnownInside == true) {
+                            HomeZoneState.INSIDE_LOCKED
+                        } else {
+                            HomeZoneState.OUTSIDE_OFF
+                        },
+                        sessionGrant = null,
+                        stopAll = false
+                    )
+                )
                 HomeZoneEvent.AwaitingMarker -> workflow(
                     snapshot,
                     HomeZoneState.INSIDE_LOCKED,
