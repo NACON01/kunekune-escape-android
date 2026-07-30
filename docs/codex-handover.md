@@ -1,6 +1,6 @@
 # クネクネ離脱 Android版 — Codex 引継書
 
-最終更新: 2026-07-22 / 対象リポジトリ: `C:\Users\junno\Projects\kunekune-escape-android`（GitHub: `NACON01/kunekune-escape-android`）
+最終更新: 2026-07-30 / 対象リポジトリ: `C:\Users\junno\Projects\kunekune-escape-android`（GitHub: `NACON01/kunekune-escape-android`）
 
 このドキュメントは、これまでの開発経緯・現在地・技術的制約・今後の実装をCodexに引き継ぐための総合資料です。**新しく着手する前に必ず全体を読んでください。** 各フェーズの詳細な解説は `docs/phase1a-*.md` 〜 `docs/phase1d-*.md` にもあります。
 
@@ -95,7 +95,9 @@
 
 ## 4. 現在地
 
-**Phase 2+を製品化方向へ再構築済み。** ホスト側ユニットテストとDebugビルドを通した段階であり、実機でのタッチ通過、マーカーロック遷移、追跡喪失、到着精度は未検証。詳細は `docs/phase2-architecture.md`。
+**Phase 2+を製品化方向へ再構築済み。** 加えて、複数目的地、Homeジオフェンス、選択済みアプリ保護、選択済みドメインのDNS専用VPN保護を実装した。到着案内は2秒で消去する。ホスト側ユニットテスト134件、`compileDebugKotlin`、`assembleDebug`、`git diff --check`は成功し、Pixel 6a（`29091JEGR11364`）への上書きインストールと`MainActivity`起動・プロセス生存・致命的クラッシュ/ANRなしを確認した。実際の権限付与、ジオフェンス遷移、アプリ/ドメインのブロック・解除は未確認であり、手動UI検証が必要。
+
+Homeは正の任意半径で設定し、100m未満には警告を出す。自宅内かつ選択済み対象がある場合に保護をON、自宅外へのEXITでは誘導、SessionGrant、アプリ保護オーバーレイ、DNS VPNを完全停止する。不明判定は直前の判定を維持し、履歴がなければOFFと警告にする。ドメイン保護は明示的な初回`VpnService`同意後のDNS専用IPv4 `/32` split tunnelであり、IPv6は迂回する。DoH/DoT、直接またはキャッシュ済みIP、アプリ独自リゾルバは保護対象外である。改ざん検知・改ざん防止は後続課題。
 
 ---
 
@@ -127,7 +129,12 @@ Android 12 の untrusted-touch 判定は `View.alpha` ではなく `WindowManage
   - 到着挙動は①フェード終了（2.5秒で暗転を滑らかに解除）②すぐ解除（650ms表示後に終了）の2モード。誘導開始のたびに選択し、サービス開始時に固定する。
   - 変更履歴は `docs/patch-notes.md` にパッチノート形式で継続記録する。
   - **セッションログ**: 発動時刻・軌跡・到着時刻・到着後の再視聴までの時間 等をJSON保存し、仮説検証(ブロッカー方式との比較)に使う。
-- **将来**: マーカーレス化(出発点が毎回同じ利用特性を使った軌跡マッチング / Cloud Anchors)、複数目的地。
+- **複数目的地・Home保護（実装済み、手動確認待ち）**:
+  - 下部タブは `Guidance` / `Routes` / `Targets` / `Home`。名前付き経路は目的地ごとに1本とし、マーカー認識後に目的地を選ぶ。
+  - ブロック対象は選択済みのものだけ。複数選択と、最初に自動起動する対象の個別選択を行う。
+  - 選択済みアプリはUsage Accessとオーバーレイで保護し、同一訪問世代かつ有効な誘導中のSessionGrantだけが解除する。
+  - 選択済みドメインは初回の明示的`VpnService`同意後、DNS専用IPv4 `/32` split tunnelで保護する。IPv6は迂回し、DoH/DoT、直接/キャッシュ済みIP、アプリ独自リゾルバは対象外。
+- **将来**: マーカーレス化(出発点が毎回同じ利用特性を使った軌跡マッチング / Cloud Anchors)。
 
 ---
 
@@ -149,8 +156,14 @@ Android 12 の untrusted-touch 判定は `View.alpha` ではなく `WindowManage
 - `FadeController.kt` — 正味前進蓄積、猶予、ヒステリシス、追跡喪失凍結を持つ純粋ロジック。
 - `ContinuousViewingTracker.kt` / `UsageStatsForegroundReader.kt` — camera FGSセッション内だけで、起動した実パッケージの連続前面利用を判定する。
 - `TrackingRecoveryPolicy.kt` — 初回8秒、確立後PAUSEDの自動復帰、STOPPED安全停止を分離した純粋ポリシー。
+- `RouteCatalog.kt` / `RouteRepository.kt` / `RouteJsonCodec.kt` — 名前付き経路カタログ、目的地ごとの経路保存、JSON入出力。
+- `ArrivalMessagePolicy.kt` — 到着案内の2秒表示期限を決める純粋ポリシー。
+- `BlockTarget.kt` / `BlockTargetStore.kt` — アプリ・ドメイン対象と選択状態、初回自動起動対象の永続化。
+- `HomeZone.kt` / `HomeZoneRuntime.kt` / `HomeZoneGeofence.kt` / `HomeZoneLocation.kt` — Home半径、永続状態、ジオフェンス、位置判定。
+- `AppProtectionController.kt` / `AppProtectionPolicy.kt` / `AppProtectionService.kt` / `AppProtectionOverlay.kt` — 選択済みアプリをUsage Accessとオーバーレイで保護する実装。
+- `DomainProtectionController.kt` / `DomainProtectionPolicy.kt` / `DomainProtectionVpnService.kt` / `DnsMessage.kt` / `Ipv4UdpPacket.kt` — 選択済みドメインのDNS専用VPN、DNS/IPv4-UDP処理。
 
-`app/src/test/java/.../` — pure test classes: `RouteRecorderTest`, `GuidanceEngineTest`, `FadeControllerTest`, `GuidanceProgressSafetyTest`, `StoredRouteValidatorTest`, `TerminalFailureStatusTest`。
+`app/src/test/java/.../` — pure test classesに加え、経路カタログ、Home状態/ジオフェンス、対象選択、アプリ保護、ドメイン保護、DNS/IPv4-UDPのテストを含む（134件）。
 `tools/GenerateMarker.java` — マーカー画像生成(乱数シード固定)。`tools/arcoreimg/`(gitignore) — 品質検証ツール。
 `docs/` — 各フェーズ解説、`marker/marker-print.html`。
 
@@ -174,6 +187,8 @@ Android 12 の untrusted-touch 判定は `View.alpha` ではなく `WindowManage
 - パーソナライズされたShortsは実アプリでしか得られない(WebViewはログイン不可)。
 - 70%まではタッチ操作を優先してwindow alpha 0.70を維持し、以降は100%暗転を優先する。80%超ではOSにより下層タッチがブロックされる。通知の表示切替と停止を逃げ道として残す。
 - 到着挙動は2dで「フェード終了/すぐ解除」を誘導開始ごとに選ぶ。将来NFC等の保留モードを追加できるよう値はサービス開始時に固定する。
+- Home保護は選択済み対象だけに限定する。アプリ保護の解除には同一訪問世代の有効な誘導中SessionGrantが必要。ドメイン保護はDNSのみで、DoH/DoT、直接/キャッシュ済みIP、アプリ独自リゾルバは迂回できる。
+- 改ざん検知・改ざん防止は未実装の後続課題。
 - 対象端末: Pixel 3a(Android 12/API31)主。借用でPixel 5。屋外は安全上不可(このメカニズムの生息地は屋内のみ)。
 
 ---
@@ -183,12 +198,13 @@ Android 12 の untrusted-touch 判定は `View.alpha` ではなく `WindowManage
 ### 環境
 - `JAVA_HOME` = Temurin JDK 17（`C:\Program Files\Eclipse Adoptium\jdk-17*`）。`ANDROID_HOME` = `C:\Users\junno\AppData\Local\Android\Sdk`。Android Studio無し。
 - ビルド: `./gradlew assembleDebug`（要 `JAVA_HOME`）。
+- 検証: `./gradlew testDebugUnitTest`、`./gradlew compileDebugKotlin`、`./gradlew assembleDebug`、`git diff --check`。
 - **`local.properties` の注意**: **BOM無し・スラッシュ区切り**で `sdk.dir=C:/Users/junno/AppData/Local/Android/Sdk`。BOM付きやバックスラッシュだとGradleがSDKを見つけられずビルド失敗。
 
 ### Codexの実行
 - 委任コマンド例（[[codex-model-preference]]に従う）:
   `codex exec -m gpt-5.6-luna -c model_reasoning_effort=high --sandbox workspace-write --skip-git-repo-check -C "C:/Users/junno/Projects/kunekune-escape-android" "<指示>"`（npmグローバル版 `C:/Users/junno/AppData/Roaming/npm/codex`）。
-- **Codexサンドボックスの制約**: `.git`書き込み・GitHub認証ができないため **commit/pushはCodex側で不可**。Codexにはビルド検証まで(`GRADLE_USER_HOME=.gradle-user-home` / `ANDROID_USER_HOME=.android-user-home` を使用)させ、**commit/push/実機インストールはClaude(またはユーザー)側で実施**する。
+- **現在のCodexワークフロー**: 必要な権限が明示されている場合、Codexはビルド検証に加えてcommit/pushまで実施できる。権限外のcommit/pushは行わず、実機インストールや手動UI確認も指示された範囲だけ行う。
 - Codexが作る一時ファイル(`.gradle-tmp*`, `_patch_probe*.txt`等)はコミット前に掃除。
 
 ### 実機インストール
